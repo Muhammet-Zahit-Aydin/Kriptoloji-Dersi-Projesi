@@ -7,3 +7,6 @@ Grup içi görev : İstemci-2 arayüzü; ECDH ve ML-KEM-768 entegrasyonu, perfor
 
 Slave - Hüseyin Şahin 445866
 Grup içi görev : İstemci-1 arayüzü, metin/PDF aktarımı; AES-128’in manuel ve kütüphaneli sürümü
+
+Platform/Dil
+Masaüstü (Windows) / Java 25
