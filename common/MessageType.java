@@ -10,6 +10,10 @@ public enum MessageType {
     FILE_END ,
     KEY_EXCHANGE ,
     ACK ,
-    ERROR
+    ERROR ,
+    KEY_EXCHANGE_INIT ,
+    KEY_EXCHANGE_REPLY ,
+    DATA_TRANSFER ,
+    DISCONNECT
 
 }
