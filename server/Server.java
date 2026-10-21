@@ -1,209 +1,85 @@
-// src/server/Server
+package server;
 
-package server ;
-
-import common.Message ;
-import common.MessageType ;
-
-import javax.crypto.Cipher ;
-import javax.crypto.SecretKey ;
-import javax.crypto.spec.IvParameterSpec ;
-import java.io.IOException ;
-import java.io.ObjectInputStream ;
-import java.io.ObjectOutputStream ;
-import java.net.ServerSocket ;
-import java.net.Socket ;
-import java.security.SecureRandom ;
-import java.util.concurrent.ConcurrentHashMap ;
+import java.io.EOFException;
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class Server {
 
-    private static final int PORT = 5000 ;
+    private static final int PORT = 5000;
 
-    // Her istemcinin veri akışını ve ona özel AES anahtarını tek bir nesnede tutmak için yardımcı sınıf
-    private static class ClientSession {
-
-        final ObjectOutputStream out ;
-        SecretKey aesKey ;
-
-        ClientSession(ObjectOutputStream out) {
-
-            this.out = out ;
-
-        }
-
-    }
-
-    // Bağlı clientleri, streamleri ve AES anahtarlarını tutmak için Hashmap
-    private static final ConcurrentHashMap<String , ClientSession> clients = new ConcurrentHashMap<>() ;
+    // Şifresiz test aşaması: Sadece bağlı istemcilerin soketlerini ve çıktı akışlarını tutuyoruz
+    private static final ConcurrentHashMap<Socket, ObjectOutputStream> clients = new ConcurrentHashMap<>();
 
     public static void main(String[] args) {
-
-        System.out.println("[DİNLENİYOR] Sunucu " + PORT + " portunda başlatıldı...") ;
+        System.out.println("[DİNLENİYOR] Sunucu " + PORT + " portunda başlatıldı (Güvensiz Metin Test Modu)...");
 
         try (ServerSocket serverSocket = new ServerSocket(PORT)) {
-
             while (true) {
+                Socket clientSocket = serverSocket.accept();
+                System.out.println("[YENİ BAĞLANTI] " + clientSocket.getInetAddress() + " bağlandı.");
 
-                Socket clientSocket = serverSocket.accept() ;
-                System.out.println("[YENİ BAĞLANTI] " + clientSocket.getInetAddress() + " bağlandı.") ;
-
-                // Virtual Threads
-                Thread.startVirtualThread(() -> handleClient(clientSocket)) ;
-
+                // Virtual Threads - Her istemciyi ayrı bir iş parçacığında dinle
+                Thread.startVirtualThread(() -> handleClient(clientSocket));
             }
-
         } catch (IOException e) {
-
-            e.printStackTrace() ;
-
+            e.printStackTrace();
         }
-
     }
 
     private static void handleClient(Socket socket) {
+        try {
+            // İletişim akışlarını oluştur
+            ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
+            ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
 
-        // Thread'in yönettiği istemcinin kimliği
-        String currentClientId = null ; 
-
-        // TCP bağlantısı üzerinden nesne okuma/yazma akışları
-        try (
-
-            ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream()) ;
-            ObjectInputStream in = new ObjectInputStream(socket.getInputStream())
-
-        ) {
+            // İstemciyi aktif listeye ekle
+            clients.put(socket, out);
 
             while (true) {
+                // readUTF: İstemciden gelen UTF-8 mesajı ve framing (boyut) bilgisini okur
+                String incomingMessage = in.readUTF();
+                System.out.println("[" + socket.getInetAddress() + "] Gelen Mesaj: " + incomingMessage);
 
-                // İstemciden gelen mesajı bekle ve oku
-                Message message = (Message) in.readObject() ;
-                System.out.println("[" + socket.getInetAddress() + "] Gelen Mesaj Tipi: " + message.type()) ;
-
-                // Modern Switch Expression
-                switch (message.type()) {
-
-                    case REGISTER -> {
-
-                        currentClientId = (String) message.payload() ;
-                        clients.put(currentClientId, new ClientSession(out)) ;
-                        System.out.println("[KAYIT] Kullanıcı kaydedildi: " + currentClientId) ;
-
-                        // Başarılı kayıttan sonra ACK gönder
-                        out.writeObject(new Message(MessageType.ACK, "Kayıt başarılı.")) ;
-                        out.flush() ;
-
-                    }
-
-                    case KEY_EXCHANGE -> {
-
-                        // TODO: Diffie-Hellman / RSA / ML-KEM anahtar değişim mantığı
-                        // Yapıldığında istemciye ait AES anahtarını ClientSession içine kaydedilmeli :
-                        // clients.get(currentClientId).aesKey = uretilenAESAnahtari ;
-
-                    }
-
-                    case TEXT -> {
-
-                        if (currentClientId == null) break ;
-
-                        String targetId = message.targetId() ;
-                        ClientSession senderSession = clients.get(currentClientId) ;
-                        ClientSession targetSession = clients.get(targetId) ;
-
-                        if (targetSession == null) {
-
-                            System.out.println("[HATA] Hedef bulunamadı: " + targetId) ;
-                            break ;
-
-                        }
-
-                        // Yönlendirme ve Yeniden Şifreleme Mekanizması
-                        try {
-
-                            byte[] encryptedPayload = (byte[]) message.payload() ;
-                            byte[] senderIv = message.iv() ;
-
-                            // Gönderenin AES anahtarı ile şifreyi çöz
-                            byte[] decryptedData = decryptData(encryptedPayload , senderSession.aesKey , senderIv) ;
-
-                            // Hedefin AES anahtarı ile yeniden şifrele
-                            byte[] newIv = generateIv();
-                            byte[] reEncryptedData = encryptData(decryptedData , targetSession.aesKey , newIv) ;
-
-                            // Hedefe ilet
-                            Message forwardMsg = new Message(MessageType.TEXT , currentClientId , targetId , reEncryptedData , newIv) ;
-                            targetSession.out.writeObject(forwardMsg) ;
-                            targetSession.out.flush() ;
-
-                            System.out.println("[YÖNLENDİRME] " + currentClientId + " -> " + targetId + " başarıyla iletildi.") ;
-
-                        } catch (Exception e) {
-
-                            System.out.println("[KRİPTO HATASI] Mesaj işlenemedi: " + e.getMessage()) ;
-
-                        }
-
-                    }
-
-                    case FILE_START, FILE_CHUNK, FILE_END -> {
-
-                        // TODO: Dosya transfer mantığı (Metin ile aynı şifre çözme/şifreleme adımlarını içermeli)
-
-                    }
-
-                    default -> {
-
-                        out.writeObject(new Message(MessageType.ERROR , "Bilinmeyen istek.")) ;
-                        out.flush() ;
-
-                    }
-
-                }
-
+                // Gelen mesajı, gönderen hariç diğer tüm istemcilere dağıt
+                broadcastMessage(incomingMessage, socket);
             }
 
+        } catch (EOFException e) {
+            System.out.println("[KOPTU] İstemci bağlantıyı güvenli şekilde kapattı: " + socket.getInetAddress());
         } catch (Exception e) {
-
-            System.out.println("[BAĞLANTI KESİLDİ] İstemci ayrıldı. Sebep: " + e.getMessage()) ;
-
+            System.out.println("[HATA] İstemci bağlantı hatası: " + e.getMessage());
         } finally {
-
-            if (currentClientId != null) {
-                clients.remove(currentClientId) ;
-                System.out.println("[SİLİNDİ] " + currentClientId + " sistemden kaldırıldı.") ;
+            // Bağlantı koptuğunda istemciyi listeden sil ve soketi kapat
+            clients.remove(socket);
+            System.out.println("[SİLİNDİ] " + socket.getInetAddress() + " sistemden kaldırıldı.");
+            try {
+                if (!socket.isClosed()) socket.close();
+            } catch (IOException e) {
+                e.printStackTrace();
             }
-
         }
-
     }
 
-    // --- Kriptografik Yardımcı Metotlar ---
+    // Mesajı diğer istemcilere iletme (Yönlendirme) metodu
+    private static void broadcastMessage(String message, Socket senderSocket) {
+        for (ConcurrentHashMap.Entry<Socket, ObjectOutputStream> entry : clients.entrySet()) {
+            Socket targetSocket = entry.getKey();
+            ObjectOutputStream targetOut = entry.getValue();
 
-    private static byte[] decryptData(byte[] data , SecretKey key , byte[] iv) throws Exception {
-
-        if (key == null) throw new IllegalStateException("AES anahtarı henüz kurulmamış") ;
-        Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding") ;
-        cipher.init(Cipher.DECRYPT_MODE , key , new IvParameterSpec(iv)) ;
-        return cipher.doFinal(data) ;
-
+            // Mesajı gönderenin kendisine geri yollama (sadece hedefe gönder)
+            if (targetSocket != senderSocket) {
+                try {
+                    targetOut.writeUTF(message);
+                    targetOut.flush();
+                } catch (IOException e) {
+                    System.out.println("[İLETİM HATASI] Hedefe ulaşılamadı: " + targetSocket.getInetAddress());
+                }
+            }
+        }
     }
-
-    private static byte[] encryptData(byte[] data , SecretKey key , byte[] iv) throws Exception {
-
-        if (key == null) throw new IllegalStateException("AES anahtarı henüz kurulmamış") ;
-        Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding") ;
-        cipher.init(Cipher.ENCRYPT_MODE , key , new IvParameterSpec(iv)) ;
-        return cipher.doFinal(data) ;
-
-    }
-
-    private static byte[] generateIv() {
-
-        byte[] iv = new byte[16] ;
-        new SecureRandom().nextBytes(iv) ;
-        return iv ;
-
-    }
-
 }

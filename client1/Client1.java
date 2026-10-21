@@ -72,6 +72,10 @@ public class Client1 extends JFrame {
         btnConnect.addActionListener(e -> connectToServer());
         btnDisconnect.addActionListener(e -> disconnectFromServer());
         btnFileSelect.addActionListener(e -> selectFile());
+        
+        // Mesaj Gönderme Dinleyicileri
+        btnSend.addActionListener(e -> sendMessage());
+        txtMessageInput.addActionListener(e -> sendMessage());
     }
 
     // Sunucuya Bağlanma Fonksiyonu
@@ -102,6 +106,9 @@ public class Client1 extends JFrame {
                     btnDisconnect.setEnabled(true);
                     btnSend.setEnabled(true);
                 });
+                
+                // Gelen mesajları dinlemek için arka planda çalışan thread başlatılır
+                new Thread(this::receiveMessages).start();
 
             } catch (IOException ex) {
                 SwingUtilities.invokeLater(() -> {
@@ -118,17 +125,60 @@ public class Client1 extends JFrame {
             if (in != null) in.close();
             if (socket != null && !socket.isClosed()) socket.close();
 
-            txtMessages.append("Bağlantı kesildi.\n");
-            
-            // Arayüzü başlangıç durumuna döndür
-            btnConnect.setEnabled(true);
-            txtIp.setEditable(true);
-            txtPort.setEditable(true);
-            btnDisconnect.setEnabled(false);
-            btnSend.setEnabled(false);
+            SwingUtilities.invokeLater(() -> {
+                txtMessages.append("Bağlantı kesildi.\n");
+                
+                // Arayüzü başlangıç durumuna döndür
+                btnConnect.setEnabled(true);
+                txtIp.setEditable(true);
+                txtPort.setEditable(true);
+                btnDisconnect.setEnabled(false);
+                btnSend.setEnabled(false);
+            });
 
         } catch (IOException ex) {
-            txtMessages.append("Bağlantı kesilirken hata oluştu: " + ex.getMessage() + "\n");
+            SwingUtilities.invokeLater(() -> txtMessages.append("Bağlantı kesilirken hata oluştu: " + ex.getMessage() + "\n"));
+        }
+    }
+
+    // Mesaj Gönderme Fonksiyonu (Framing ve UTF-8 Testi)
+    private void sendMessage() {
+        String text = txtMessageInput.getText().trim();
+        if (!text.isEmpty()) {
+            try {
+                // writeUTF: Mesajın başına uzunluğunu ekler (Framing) ve UTF-8 olarak gönderir.
+                out.writeUTF(text);
+                out.flush(); // Tamponu boşaltıp verinin anında ağa itilmesini sağlar
+                
+                txtMessages.append("Sen: " + text + "\n");
+                txtMessageInput.setText(""); // Gönderdikten sonra kutuyu temizle
+            } catch (IOException ex) {
+                JOptionPane.showMessageDialog(this, "Mesaj gönderilemedi: " + ex.getMessage(), "Hata", JOptionPane.ERROR_MESSAGE);
+                disconnectFromServer();
+            }
+        }
+    }
+
+    // Sunucudan Gelen Mesajları Dinleme Fonksiyonu
+    private void receiveMessages() {
+        try {
+            while (true) {
+                // readUTF: Gelen mesajın çerçevesini (uzunluğunu) okur ve bitişine kadar UTF-8 olarak çözer
+                String incomingMessage = in.readUTF();
+                
+                SwingUtilities.invokeLater(() -> {
+                    txtMessages.append("Karşı Taraf: " + incomingMessage + "\n");
+                });
+            }
+        } catch (EOFException ex) {
+            SwingUtilities.invokeLater(() -> txtMessages.append("Bağlantı karşı taraf tarafından kapatıldı.\n"));
+            disconnectFromServer();
+        } catch (IOException ex) {
+            // Soket biz kapattığımızda veya ağ koptuğunda düşecek hata
+            if (socket != null && !socket.isClosed()) {
+                SwingUtilities.invokeLater(() -> txtMessages.append("Dinleme hatası veya ağ koptu.\n"));
+                disconnectFromServer();
+            }
         }
     }
 
