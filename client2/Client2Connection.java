@@ -2,6 +2,10 @@ package client2;
 
 import common.Message;
 import common.MessageType;
+import common.FileTransfer;
+import common.FileTransferReceiver;
+import common.FileTransferSender;
+import common.InsecureFrameCodec;
 
 import java.io.EOFException;
 import java.io.IOException;
@@ -10,10 +14,12 @@ import java.io.ObjectOutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketException;
+import java.nio.file.Path;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiConsumer;
 
-/** Client-2'nin mevcut nesne tabanlı TCP protokolünü kullanan bağlantısı. */
+/** Güncel sunucu ve Client-1 ile aynı ObjectStream + readUTF/writeUTF taşıması. */
 public final class Client2Connection implements AutoCloseable {
     public static final String CLIENT_ID = "Client2";
     private static final int TIMEOUT_MS = 5000;
@@ -24,11 +30,18 @@ public final class Client2Connection implements AutoCloseable {
     private final Listener listener;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AtomicBoolean receiving = new AtomicBoolean();
+    private final AtomicBoolean fileSending = new AtomicBoolean();
+    private final FileTransferReceiver fileReceiver = new FileTransferReceiver();
 
     /** Bildirimler ağ iş parçacığından gelebilir; arayüz EDT'ye aktarmalıdır. */
     public interface Listener {
         void onMessage(Message message);
         void onDisconnected(String reason);
+
+        default void onFileProgress(FileTransfer.Start file, long receivedBytes) { }
+        default void onFileReceived(FileTransferReceiver.ReceivedFile file) {
+            try { file.close(); } catch (IOException ignored) { }
+        }
     }
 
     private Client2Connection(Socket socket, ObjectOutputStream out,
@@ -39,7 +52,7 @@ public final class Client2Connection implements AutoCloseable {
         this.listener = listener;
     }
 
-    /** TCP bağlantısı ve REGISTER/ACK tamamlanmadan kullanılabilir bağlantı dönmez. */
+    /** Güncel güvensiz sunucu REGISTER/ACK kullanmaz; akış başlıkları beklenir. */
     public static Client2Connection connect(String host, int port, Listener listener)
             throws IOException {
         Objects.requireNonNull(listener, "listener");
@@ -58,25 +71,8 @@ public final class Client2Connection implements AutoCloseable {
             ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
             out.flush();
             ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
-            out.writeObject(new Message(MessageType.REGISTER, CLIENT_ID));
-            out.flush();
-
-            Object response = in.readObject();
-            if (!(response instanceof Message message) || message.type() == null) {
-                throw new IOException("Sunucu geçerli bir kayıt cevabı göndermedi.");
-            }
-            if (message.type() == MessageType.ERROR) {
-                throw new IOException("Kayıt reddedildi: " + message.payload());
-            }
-            if (message.type() != MessageType.ACK) {
-                throw new IOException("Kayıt için ACK bekleniyordu: " + message.type());
-            }
-
-            socket.setSoTimeout(0); // Boşta kalan sohbet bağlantısı zaman aşımına uğramaz.
+            socket.setSoTimeout(0); // Boşta duran sohbet bağlantısı açık kalır.
             return new Client2Connection(socket, out, in, listener);
-        } catch (ClassNotFoundException e) {
-            closeSocket(socket);
-            throw new IOException("Kayıt cevabının mesaj sınıfı tanınmıyor.", e);
         } catch (IOException | RuntimeException e) {
             closeSocket(socket);
             throw e;
@@ -94,14 +90,36 @@ public final class Client2Connection implements AutoCloseable {
         if (text == null || text.isBlank()) {
             throw new IllegalArgumentException("Boş mesaj gönderilemez.");
         }
+        // Yerel boyut hatası, sağlam bir bağlantıyı kapatmaz.
+        writeFrame(InsecureFrameCodec.encode(new Message(MessageType.TEXT, text)));
+    }
+
+    public void sendPdf(Path path, BiConsumer<FileTransfer.Start, Long> progress) throws IOException {
+        Objects.requireNonNull(progress, "progress");
+        if (!fileSending.compareAndSet(false, true)) throw new IOException("Bir PDF zaten gönderiliyor.");
+        AtomicBoolean started = new AtomicBoolean();
+        try {
+            FileTransfer.Start metadata = FileTransferSender.inspect(path);
+            FileTransferSender.send(path, metadata, CLIENT_ID, "Client1", message -> {
+                started.set(true);
+                writeFrame(InsecureFrameCodec.encode(message));
+            }, bytes -> progress.accept(metadata, bytes));
+        } catch (IOException e) {
+            // END gönderilemeyen aktarım alıcıda tamamlanmış sayılmamalı.
+            if (started.get()) disconnect("PDF gönderimi yarıda kesildi: " + e.getMessage());
+            throw e;
+        } finally {
+            fileSending.set(false);
+        }
+    }
+
+    private void writeFrame(String frame) throws IOException {
         try {
             synchronized (out) {
                 if (closed.get()) {
                     throw new IOException("Sunucu bağlantısı kapalı.");
                 }
-                out.writeObject(new Message(MessageType.TEXT, text));
-                // Uzun oturumlarda nesnelerin çıktı akışında birikmesini önle.
-                out.reset();
+                out.writeUTF(frame);
                 out.flush();
             }
         } catch (IOException e) {
@@ -113,27 +131,45 @@ public final class Client2Connection implements AutoCloseable {
     private void receiveLoop() {
         try {
             while (!closed.get()) {
-                Object value = in.readObject();
-                if (!(value instanceof Message message) || message.type() == null) {
-                    throw new IOException("Sunucudan geçersiz mesaj alındı.");
+                Message message = InsecureFrameCodec.decode(in.readUTF());
+                if (message.type() == MessageType.TEXT) {
+                    listener.onMessage(message);
+                } else {
+                    receiveFile(message);
                 }
-                if (message.type() == MessageType.TEXT && !(message.payload() instanceof String)) {
-                    throw new IOException("TEXT mesajının içeriği metin olmalıdır.");
-                }
-                listener.onMessage(message);
             }
         } catch (EOFException | SocketException e) {
             disconnect("Sunucu bağlantıyı kapattı.");
-        } catch (IOException | ClassNotFoundException e) {
+        } catch (IOException e) {
             disconnect("Mesaj alınamadı: " + e.getMessage());
         } finally {
             disconnect("Bağlantı kapatıldı.");
         }
     }
 
+    private void receiveFile(Message message) throws IOException {
+        synchronized (fileReceiver) {
+            switch (message.type()) {
+                case FILE_START -> fileReceiver.start((FileTransfer.Start) message.payload());
+                case FILE_CHUNK -> fileReceiver.append((FileTransfer.Chunk) message.payload());
+                case FILE_END -> {
+                    listener.onFileReceived(fileReceiver.finish((FileTransfer.End) message.payload()));
+                    return;
+                }
+                default -> throw new IOException("Beklenmeyen dosya paketi.");
+            }
+            listener.onFileProgress(fileReceiver.metadata(), fileReceiver.receivedBytes());
+        }
+    }
+
     private void disconnect(String reason) {
         if (closed.compareAndSet(false, true)) {
-            closeSocket(socket); // Bekleyen readObject çağrısını da sonlandırır.
+            closeSocket(socket); // Bekleyen readUTF çağrısını da sonlandırır.
+            try {
+                fileReceiver.close();
+            } catch (IOException e) {
+                reason += " Geçici PDF temizlenemedi: " + e.getMessage();
+            }
             listener.onDisconnected(reason);
         }
     }
