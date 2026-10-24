@@ -1,85 +1,323 @@
-package server;
+package server ;
 
-import java.io.EOFException;
-import java.io.IOException;
-import java.io.ObjectInputStream;
-import java.io.ObjectOutputStream;
-import java.net.ServerSocket;
-import java.net.Socket;
-import java.util.concurrent.ConcurrentHashMap;
+import common.Message ;
+import common.MessageType ;
+
+import javax.crypto.Cipher ;
+import javax.crypto.SecretKey ;
+import javax.crypto.spec.IvParameterSpec ;
+import java.io.File ;
+import java.io.FileOutputStream ;
+import java.io.IOException ;
+import java.io.ObjectInputStream ;
+import java.io.ObjectOutputStream ;
+import java.net.ServerSocket ;
+import java.net.Socket ;
+import java.security.SecureRandom ;
+import java.util.concurrent.ConcurrentHashMap ;
 
 public class Server {
 
-    private static final int PORT = 5000;
+    private static final int PORT = 5000 ;
+    private static final String UPLOAD_DIR = "captures" ;
 
-    // Şifresiz test aşaması: Sadece bağlı istemcilerin soketlerini ve çıktı akışlarını tutuyoruz
-    private static final ConcurrentHashMap<Socket, ObjectOutputStream> clients = new ConcurrentHashMap<>();
+    // Her istemcinin oturumunu ve transfer durumunu tutan yapı
+    private static class ClientSession {
+
+        final ObjectOutputStream out;
+        SecretKey aesKey ; 
+
+        // Dosya transfer takibi
+        String activeFileName ;
+        long expectedFileSize ;
+        long bytesReceived ;
+        int expectedChunkIndex ;
+        FileOutputStream fileOut ;
+
+        ClientSession(ObjectOutputStream out) {
+
+            this.out = out ;
+        }
+
+    }
+
+    private static final ConcurrentHashMap<String , ClientSession> clients = new ConcurrentHashMap<>() ;
 
     public static void main(String[] args) {
-        System.out.println("[DİNLENİYOR] Sunucu " + PORT + " portunda başlatıldı (Güvensiz Metin Test Modu)...");
 
+        // Dosyaların kaydedileceği klasörü oluştur
+        File dir = new File(UPLOAD_DIR) ;
+        if (!dir.exists()) dir.mkdir() ;
+
+        System.out.println("[DİNLENİYOR] Sunucu " + PORT + " portunda başlatıldı...") ;
         try (ServerSocket serverSocket = new ServerSocket(PORT)) {
-            while (true) {
-                Socket clientSocket = serverSocket.accept();
-                System.out.println("[YENİ BAĞLANTI] " + clientSocket.getInetAddress() + " bağlandı.");
 
-                // Virtual Threads - Her istemciyi ayrı bir iş parçacığında dinle
-                Thread.startVirtualThread(() -> handleClient(clientSocket));
+            while (true) {
+
+                Socket clientSocket = serverSocket.accept() ;
+                System.out.println("[YENİ BAĞLANTI] " + clientSocket.getInetAddress() + " bağlandı.") ;
+                Thread.startVirtualThread(() -> handleClient(clientSocket)) ;
+
             }
+
         } catch (IOException e) {
-            e.printStackTrace();
+
+            e.printStackTrace() ;
+
         }
+
     }
 
     private static void handleClient(Socket socket) {
-        try {
-            // İletişim akışlarını oluştur
-            ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
-            ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
 
-            // İstemciyi aktif listeye ekle
-            clients.put(socket, out);
+        String currentClientId = null ;
+
+        try (
+
+            ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
+            ObjectInputStream in = new ObjectInputStream(socket.getInputStream())
+
+        ) {
 
             while (true) {
-                // readUTF: İstemciden gelen UTF-8 mesajı ve framing (boyut) bilgisini okur
-                String incomingMessage = in.readUTF();
-                System.out.println("[" + socket.getInetAddress() + "] Gelen Mesaj: " + incomingMessage);
 
-                // Gelen mesajı, gönderen hariç diğer tüm istemcilere dağıt
-                broadcastMessage(incomingMessage, socket);
-            }
+                Message message = (Message) in.readObject() ;
+                
+                switch (message.type()) {
 
-        } catch (EOFException e) {
-            System.out.println("[KOPTU] İstemci bağlantıyı güvenli şekilde kapattı: " + socket.getInetAddress());
-        } catch (Exception e) {
-            System.out.println("[HATA] İstemci bağlantı hatası: " + e.getMessage());
-        } finally {
-            // Bağlantı koptuğunda istemciyi listeden sil ve soketi kapat
-            clients.remove(socket);
-            System.out.println("[SİLİNDİ] " + socket.getInetAddress() + " sistemden kaldırıldı.");
-            try {
-                if (!socket.isClosed()) socket.close();
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-        }
-    }
+                    case REGISTER -> {
 
-    // Mesajı diğer istemcilere iletme (Yönlendirme) metodu
-    private static void broadcastMessage(String message, Socket senderSocket) {
-        for (ConcurrentHashMap.Entry<Socket, ObjectOutputStream> entry : clients.entrySet()) {
-            Socket targetSocket = entry.getKey();
-            ObjectOutputStream targetOut = entry.getValue();
+                        currentClientId = (String) message.payload() ;
+                        clients.put(currentClientId , new ClientSession(out)) ;
+                        System.out.println("[KAYIT] Kullanıcı kaydedildi: " + currentClientId) ;
+                        out.writeObject(new Message(MessageType.ACK , "Kayıt başarılı.")) ;
+                        out.flush() ;
 
-            // Mesajı gönderenin kendisine geri yollama (sadece hedefe gönder)
-            if (targetSocket != senderSocket) {
-                try {
-                    targetOut.writeUTF(message);
-                    targetOut.flush();
-                } catch (IOException e) {
-                    System.out.println("[İLETİM HATASI] Hedefe ulaşılamadı: " + targetSocket.getInetAddress());
+                    }
+
+                    case KEY_EXCHANGE -> {
+
+                        // TODO: Anahtar değişim mantığı. İşlem bitince:
+                        // clients.get(currentClientId).aesKey = createdAESKey ;
+
+                    }
+
+                    case TEXT -> {
+
+                        if (currentClientId == null) break ;
+                        String targetId = message.targetId() ;
+                        ClientSession senderSession = clients.get(currentClientId) ;
+                        ClientSession targetSession = clients.get(targetId) ;
+
+                        if (targetSession == null) {
+
+                            System.out.println("[HATA] Hedef bulunamadı: " + targetId) ;
+                            break ;
+
+                        }
+
+                        byte[] payload = (byte[]) message.payload() ;
+                        byte[] iv = message.iv() ;
+                        String textContent ;
+                        Message forwardMsg ;
+
+                        // Şifreli mesaj kontrolü
+                        if (iv != null && senderSession.aesKey != null && targetSession.aesKey != null) {
+
+                            byte[] decryptedData = decryptData(payload , senderSession.aesKey , iv) ;
+                            textContent = new String(decryptedData) ;
+
+                            byte[] newIv = generateIv() ;
+                            byte[] reEncryptedData = encryptData(decryptedData , targetSession.aesKey , newIv) ;
+                            forwardMsg = new Message(MessageType.TEXT, currentClientId , targetId , reEncryptedData , newIv) ;
+                            System.out.println("[GÜVENLİ METİN] Çözüldü -> " + currentClientId + ": " + textContent) ;
+
+                        } else {
+
+                            textContent = new String(payload) ;
+                            forwardMsg = new Message(MessageType.TEXT, currentClientId , targetId , payload , null) ;
+                            System.out.println("[GÜVENSİZ METİN] " + currentClientId + ": " + textContent) ;
+
+                        }
+
+                        targetSession.out.writeObject(forwardMsg) ;
+                        targetSession.out.flush() ;
+
+                    }
+
+                    case FILE_START -> {
+
+                        String targetId = message.targetId() ;
+                        ClientSession senderSession = clients.get(currentClientId) ;
+                        ClientSession targetSession = clients.get(targetId) ;
+                        
+                        // Payload "dosyaadi.pdf;boyut" formatında geldiği varsayılmıştır
+                        String fileInfo = (String) message.payload() ;
+                        String[] parts = fileInfo.split(";") ;
+                        String filename = parts[0] ;
+                        long size = parts.length > 1 ? Long.parseLong(parts[1]) : -1 ;
+
+                        if (!isValidFilename(filename)) {
+
+                            System.out.println("[GÜVENLİK İHLALİ] Geçersiz dosya yolu engellendi: " + filename) ;
+                            break ;
+
+                        }
+
+                        senderSession.activeFileName = filename ;
+                        senderSession.expectedFileSize = size ;
+                        senderSession.bytesReceived = 0 ;
+                        senderSession.expectedChunkIndex = 0 ;
+                        
+                        File destFile = new File(UPLOAD_DIR, filename) ;
+                        senderSession.fileOut = new FileOutputStream(destFile) ;
+                        System.out.println("[DOSYA TRANSFERİ BAŞLADI] " + filename + " (Boyut: " + size + " byte)") ;
+
+                        if (targetSession != null) {
+
+                            targetSession.out.writeObject(message) ;
+                            targetSession.out.flush() ;
+
+                        }
+
+                    }
+
+                    case FILE_CHUNK -> {
+
+                        String targetId = message.targetId() ;
+                        ClientSession senderSession = clients.get(currentClientId) ;
+                        ClientSession targetSession = clients.get(targetId) ;
+
+                        if (senderSession == null || senderSession.fileOut == null) break ;
+
+                        byte[] chunk = (byte[]) message.payload(); 
+                        byte[] iv = message.iv() ;
+                        Message forwardMsg ;
+
+                        // Şifreli chunk çözümü
+                        if (iv != null && senderSession.aesKey != null) {
+
+                            chunk = decryptData(chunk , senderSession.aesKey , iv) ;
+
+                        }
+
+                        // Sunucuya kaydet ve sıra/boyut sayacını güncelle
+                        senderSession.fileOut.write(chunk) ;
+                        senderSession.bytesReceived += chunk.length ;
+                        senderSession.expectedChunkIndex++ ;
+
+                        if (targetSession != null) {
+
+                            // Hedefe yönlendir
+                            if (iv != null && targetSession.aesKey != null) {
+
+                                byte[] newIv = generateIv() ;
+                                byte[] reEncryptedChunk = encryptData(chunk , targetSession.aesKey , newIv) ;
+                                forwardMsg = new Message(MessageType.FILE_CHUNK , currentClientId , targetId , reEncryptedChunk , newIv) ;
+
+                            } else {
+
+                                forwardMsg = new Message(MessageType.FILE_CHUNK, currentClientId , targetId , chunk , null) ;
+
+                            }
+
+                            targetSession.out.writeObject(forwardMsg) ;
+                            targetSession.out.flush() ;
+
+                        }
+
+                    }
+
+                    case FILE_END -> {
+
+                        String targetId = message.targetId() ;
+                        ClientSession senderSession = clients.get(currentClientId) ;
+                        ClientSession targetSession = clients.get(targetId) ;
+
+                        if (senderSession != null && senderSession.fileOut != null) {
+
+                            senderSession.fileOut.close() ;
+                            System.out.println("[DOSYA TAMAMLANDI] " + senderSession.activeFileName + " başarıyla sunucuya kaydedildi.") ;
+
+                            
+                            // Boyut doğrulaması
+                            if (senderSession.expectedFileSize != -1 && senderSession.bytesReceived != senderSession.expectedFileSize) {
+
+                                System.out.println("[UYARI] Dosya boyutu uyumsuz! Beklenen: " + senderSession.expectedFileSize + ", Alınan: " + senderSession.bytesReceived) ;
+
+                            }
+                            
+                            // State sıfırla
+                            senderSession.fileOut = null ;
+
+                        }
+
+                        if (targetSession != null) {
+
+                            targetSession.out.writeObject(message) ;
+                            targetSession.out.flush() ;
+
+                        }
+
+                    }
+
+                    default -> {
+
+                        out.writeObject(new Message(MessageType.ERROR , "Bilinmeyen istek.")) ;
+                        out.flush() ;
+
+                    }
+
                 }
+
             }
+
+        } catch (Exception e) {
+
+            System.out.println("[BAĞLANTI KESİLDİ] " + currentClientId + " ayrıldı. Sebep: " + e.getMessage()) ;
+
+        } finally {
+
+            if (currentClientId != null) {
+
+                clients.remove(currentClientId) ;
+
+            }
+
         }
+
     }
+
+    // Klasör dışına çıkmayı hedefleyen path traversal zafiyetini engeller
+    private static boolean isValidFilename(String filename) {
+
+        if (filename == null || filename.isBlank()) return false ;
+        return !filename.contains("..") && !filename.contains("/") && !filename.contains("\\") ;
+
+    }
+
+    private static byte[] decryptData(byte[] data , SecretKey key , byte[] iv) throws Exception {
+
+        Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding") ;
+        cipher.init(Cipher.DECRYPT_MODE , key , new IvParameterSpec(iv)) ;
+        return cipher.doFinal(data) ;
+
+    }
+
+    private static byte[] encryptData(byte[] data , SecretKey key , byte[] iv) throws Exception {
+        
+        Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding") ;
+        cipher.init(Cipher.ENCRYPT_MODE , key , new IvParameterSpec(iv)) ;
+        return cipher.doFinal(data) ;
+
+    }
+
+    private static byte[] generateIv() {
+
+        byte[] iv = new byte[16] ;
+        new SecureRandom().nextBytes(iv) ;
+        return iv ;
+
+    }
+
 }
