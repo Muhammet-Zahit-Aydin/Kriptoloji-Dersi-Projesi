@@ -4,6 +4,7 @@ import common.Message;
 import common.FileTransfer;
 import common.FileTransferReceiver.ReceivedFile;
 import common.FileTransferSender;
+import common.crypto.CryptoMode;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Dimension;
@@ -40,6 +41,8 @@ public class Client2 extends JFrame {
 
     private final JTextField txtIp = new JTextField("127.0.0.1", 12);
     private final JTextField txtPort = new JTextField("5000", 5);
+    private final JComboBox<CryptoMode> cmbCryptoMode = new JComboBox<>(CryptoMode.values());
+    private final javax.swing.JPasswordField txtPassphrase = new javax.swing.JPasswordField(12);
     private final JButton btnConnect = new JButton("Bağlan");
     private final JButton btnDisconnect = new JButton("Bağlantıyı Kes");
     private final JLabel lblStatus = new JLabel();
@@ -69,8 +72,8 @@ public class Client2 extends JFrame {
     private boolean savingFile;
 
     public Client2() {
-        setTitle("Client-2 (Hasan) - Güvensiz Metin / PDF");
-        setSize(940, 760);
+        setTitle("Client-2 (Hasan) - Metin / PDF / AES");
+        setSize(1120, 760);
         setMinimumSize(new Dimension(820, 660));
         setLocationRelativeTo(null);
         setDefaultCloseOperation(DISPOSE_ON_CLOSE);
@@ -80,13 +83,16 @@ public class Client2 extends JFrame {
         setContentPane(root);
 
         JPanel connectionPanel = new JPanel(new BorderLayout());
-        JPanel controls = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
-        controls.add(new JLabel("Sunucu IP:"));
-        controls.add(txtIp);
-        controls.add(new JLabel("Port:"));
-        controls.add(txtPort);
-        controls.add(btnConnect);
-        controls.add(btnDisconnect);
+        JPanel controls = new JPanel(new BorderLayout(0, 4));
+        JPanel networkControls = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        networkControls.add(new JLabel("Sunucu IP:")); networkControls.add(txtIp);
+        networkControls.add(new JLabel("Port:")); networkControls.add(txtPort);
+        networkControls.add(btnConnect); networkControls.add(btnDisconnect);
+        JPanel securityControls = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        securityControls.add(new JLabel("Şifreleme:")); securityControls.add(cmbCryptoMode);
+        securityControls.add(new JLabel("Ortak parola:")); securityControls.add(txtPassphrase);
+        controls.add(networkControls, BorderLayout.NORTH);
+        controls.add(securityControls, BorderLayout.SOUTH);
         connectionPanel.add(controls, BorderLayout.NORTH);
 
         JPanel statusPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 10));
@@ -195,6 +201,12 @@ public class Client2 extends JFrame {
             return;
         }
 
+        CryptoMode mode = (CryptoMode) cmbCryptoMode.getSelectedItem();
+        String password = new String(txtPassphrase.getPassword());
+        if (mode != CryptoMode.INSECURE && password.isBlank()) {
+            JOptionPane.showMessageDialog(this, "Şifreli mod için Client-1 ile aynı parolayı girin.", "Parola gerekli", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
         connecting = true;
         setStatus("Bağlanıyor...", false);
         updateControls();
@@ -202,7 +214,7 @@ public class Client2 extends JFrame {
         SessionListener listener = new SessionListener();
         Thread.startVirtualThread(() -> {
             try {
-                Client2Connection opened = Client2Connection.connect(host, port, listener);
+                Client2Connection opened = Client2Connection.connect(host, port, listener, mode, password);
                 SwingUtilities.invokeLater(() -> {
                     connecting = false;
                     if (windowClosed) {
@@ -212,7 +224,7 @@ public class Client2 extends JFrame {
                     connection = opened;
                     listener.session = opened;
                     setStatus("Bağlı - " + host + ":" + port, true);
-                    append(txtIncoming, "[Sunucu] Güvensiz metin bağlantısı kuruldu.");
+                    append(txtIncoming, "[Sunucu] Mod: " + mode);
                     updateControls();
                     opened.startReceiving();
                     txtMessage.requestFocusInWindow();
@@ -469,6 +481,8 @@ public class Client2 extends JFrame {
         btnDisconnect.setEnabled(connected);
         txtIp.setEditable(!connecting && !connected);
         txtPort.setEditable(!connecting && !connected);
+        cmbCryptoMode.setEnabled(!connecting && !connected);
+        txtPassphrase.setEditable(!connecting && !connected);
         txtMessage.setEnabled(connected && !sending && !sendingFile);
         btnSend.setEnabled(connected && !sending && !sendingFile && !txtMessage.getText().isBlank());
         btnSelectPdf.setEnabled(!sendingFile && !inspectingPdf);

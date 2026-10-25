@@ -76,7 +76,7 @@ public final class Client2ConnectionTest {
         try (Peer peer = new Peer((in, out) -> {
             for (String expected : new String[] {TEXT, TEXT, "x".repeat(65535), escaped, TEXT}) {
                 String frame = in.readUTF();
-                check(InsecureFrameCodec.decode(frame).payload().equals(expected), "TEXT değişti");
+                check(SecureFrameCodec.decode(frame).payload().equals(expected), "TEXT değişti");
                 if (expected.equals(TEXT)) check(frame.equals(TEXT), "Client-1 uyumluluğu bozuldu");
                 out.writeUTF(frame);
                 out.flush();
@@ -118,13 +118,13 @@ public final class Client2ConnectionTest {
         Files.write(source, content);
         try (Peer peer = new Peer((in, out) -> {
             try (FileTransferReceiver receiver = new FileTransferReceiver()) {
-                Message first = InsecureFrameCodec.decode(in.readUTF());
+                Message first = SecureFrameCodec.decode(in.readUTF());
                 check(first.type() == MessageType.FILE_START, "START eksik");
                 check("Client2".equals(first.senderId()) && "Client1".equals(first.targetId()), "Kimlik eksik");
                 receiver.start((FileTransfer.Start) first.payload());
                 int chunks = 0;
                 while (true) {
-                    Message message = InsecureFrameCodec.decode(in.readUTF());
+                    Message message = SecureFrameCodec.decode(in.readUTF());
                     if (message.type() == MessageType.FILE_END) {
                         try (ReceivedFile file = receiver.finish((FileTransfer.End) message.payload())) {
                             Path copy = directory.resolve("sent.pdf");
@@ -138,7 +138,7 @@ public final class Client2ConnectionTest {
                 }
                 check(chunks > 1, "Çok parçalı aktarım denenmedi");
                 FileTransferSender.send(source, FileTransferSender.inspect(source), "Client1", "Client2",
-                        packet -> { out.writeUTF(InsecureFrameCodec.encode(packet)); out.flush(); }, bytes -> { });
+                        packet -> { out.writeUTF(SecureFrameCodec.encode(packet)); out.flush(); }, bytes -> { });
                 expectEof(in);
             }
         })) {
@@ -230,7 +230,7 @@ public final class Client2ConnectionTest {
             try (ReceivedFile ignored = receiver.finish(new FileTransfer.End(id, 1))) { }
         }
         try {
-            InsecureFrameCodec.decode("\u001eKRIPTO1:bad-base64!");
+            SecureFrameCodec.decode("\u001eKRIPTO1:bad-base64!");
             throw new AssertionError("Bozuk çerçeve kabul edildi");
         } catch (IOException expected) { }
     }
@@ -269,7 +269,7 @@ public final class Client2ConnectionTest {
         return content; // İkili aktarım fixture'ı; PDF ayrıştırıcısı testi değildir.
     }
     private static void send(ObjectOutputStream out, MessageType type, Object payload) throws IOException {
-        out.writeUTF(InsecureFrameCodec.encode(new Message(type, "Client1", "Client2", payload, null)));
+        out.writeUTF(SecureFrameCodec.encode(new Message(type, "Client1", "Client2", payload, null)));
         out.flush();
     }
     private static void expectEof(ObjectInputStream in) throws Exception {
