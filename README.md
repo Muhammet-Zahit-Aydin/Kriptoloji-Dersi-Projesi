@@ -65,6 +65,27 @@ ve parça sayısı ise aktif aktarımın kimliği ve sayılan parçalarla doğru
 
 ## AES-128 metin şifreleme
 
+### 4. gün — Hüseyin: elle AES-128 ve Client-1 dosya akışı
+
+`common.crypto.ManualAes128`, 16 byte'lık bloğu AES'in 4×4 byte state
+matrisi olarak işler. Baytlar sütun sütun yerleştirilir (`state[4 * sütun +
+satır]`). S-Box, GF(2^8)'de çarpımsal ters ve AES afin dönüşümüyle kurulur;
+KeyExpansion, 11 adet 16 byte round key üretir. Başlangıçta AddRoundKey,
+1–9. turlarda SubBytes → ShiftRows → MixColumns → AddRoundKey, son turda
+MixColumns olmadan aynı işlemler uygulanır. CBC kipinde her blok önce önceki
+şifreli blokla XOR'lanır; ilk blokta bunun yerine rastgele IV kullanılır.
+
+İlk AES-128 blok vektörü: `000102030405060708090a0b0c0d0e0f` anahtarı ve
+`00112233445566778899aabbccddeeff` açık metni, `69c4e0d86a7b0430d8cdb78070b4c55a`
+şifreli bloğunu vermelidir. `tests.ManualAes128Test` bu FIPS 197 vektörünü ve
+boş/tam blok/sınır uzunluklarında CBC gidiş-dönüşünü denetler.
+
+Client-1, **PDF Gönder** ile dosya seçer; `FileTransferSender` dosyayı
+`FILE_START` / `FILE_CHUNK` / `FILE_END` olarak ortak sözleşmeyle parçalayıp
+gönderir. Gelen paketleri `FileTransferReceiver` sırayla geçici dosyada toplar;
+tamamlanan dosya **Gelen PDF'yi Kaydet** ile seçilen hedefe kopyalanır.
+Client-2 aynı ortak aktarım bileşenlerini kullanır.
+
 İki istemcide bağlantıdan önce aynı şifreleme modu ve aynı ortak parola seçilmelidir.
 Sunucu şifreli içeriği çözmez; ortak çerçeve biçimini yapısal olarak doğrular ve
 paketi diğer istemciye aktarır. Parola bu sürümde kullanıcılar arasında güvenli bir
@@ -97,6 +118,7 @@ JDK 25 gereklidir. `java -version` ve `javac -version` çıktılarının ikisini
 javac --release 25 -encoding UTF-8 -d out common/*.java common/crypto/*.java server/*.java client1/*.java client2/*.java tests/*.java
 java -cp out tests.Client2ConnectionTest
 java -cp out tests.InsecureTextIntegrationTest
+java -cp out tests.ManualAes128Test
 ```
 
 İlk test UTF metni ve PDF sözleşmesini bir test eşiyle doğrular. İkinci test
@@ -115,6 +137,7 @@ $jdk25Path = (Resolve-Path -LiteralPath './tmp/jdk-25.0.2').Path
 & "$jdk25Path/bin/javac.exe" --release 25 -encoding UTF-8 -d out common/*.java common/crypto/*.java server/*.java client1/*.java client2/*.java tests/*.java
 & "$jdk25Path/bin/java.exe" -cp out tests.Client2ConnectionTest
 & "$jdk25Path/bin/java.exe" -cp out tests.InsecureTextIntegrationTest
+& "$jdk25Path/bin/java.exe" -cp out tests.ManualAes128Test
 ```
 
 Elle denemek için ayrı terminallerde `java -cp out server.Server`,

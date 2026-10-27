@@ -4,14 +4,7 @@ import java.util.Arrays;
 
 /** Small, table-based AES-128 block cipher implementation for coursework. */
 public final class ManualAes128 {
-    private static final int[] S = hexTable("637c777bf26b6fc53001672bfed7ab76ca82c97dfa5947f0add4a2af9ca472c0"
-            + "b7fd9326363ff7cc34a5e5f171d8311504c723c31896059a071280e2eb27b275"
-            + "09832c1a1b6e5aa0523bd6b329e32f8453d100ed20fcb15b6acbbe394a4c58cf"
-            + "d0efaafb434d338545f9027f503c9fa851a3408f929d38f5bcb6da2110fff3d2"
-            + "cd0c13ec5f974417c4a77e3d645d197360814fdc222a908846eeb814de5e0bdb"
-            + "e0323a0a4906245cc2d3ac629195e479e7c8376d8dd54ea96c56f4ea657aae08"
-            + "ba78252e1ca6b4c6e8dd741f4bbd8b8a703eb5664803f60e613557b986c11d9f"
-            + "e1f8981169d98e949b1e87e9ce5528df8ca1890dbfe6426841992d0fb054bb16");
+    private static final int[] S = createSBox();
     private static final int[] INV = inverseTable();
     private static final int[] RCON = {0x00,0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x1b,0x36};
 
@@ -89,6 +82,27 @@ public final class ManualAes128 {
         while (b != 0) { if ((b & 1) != 0) result ^= a; a = ((a << 1) ^ ((a & 0x80) != 0 ? 0x11b : 0)) & 0xff; b >>>= 1; }
         return result;
     }
+    /** AES byte substitution: multiplicative inverse in GF(2^8), then affine map. */
+    private static int[] createSBox() {
+        int[] table = new int[256];
+        for (int value = 0; value < table.length; value++) {
+            int inverse = 0;
+            if (value != 0) {
+                int base = value, exponent = 254;
+                inverse = 1;
+                while (exponent != 0) {
+                    if ((exponent & 1) != 0) inverse = mul(inverse, base);
+                    base = mul(base, base);
+                    exponent >>>= 1;
+                }
+            }
+            table[value] = inverse ^ rotateByte(inverse, 1) ^ rotateByte(inverse, 2)
+                    ^ rotateByte(inverse, 3) ^ rotateByte(inverse, 4) ^ 0x63;
+        }
+        return table;
+    }
+    private static int rotateByte(int value, int distance) {
+        return ((value << distance) | (value >>> (8 - distance))) & 0xff;
+    }
     private static int[] inverseTable() { int[] t = new int[256]; for (int i = 0; i < 256; i++) t[S[i]] = i; return t; }
-    private static int[] hexTable(String hex) { int[] t = new int[hex.length()/2]; for (int i=0;i<t.length;i++) t[i]=Integer.parseInt(hex.substring(i*2,i*2+2),16); return t; }
 }

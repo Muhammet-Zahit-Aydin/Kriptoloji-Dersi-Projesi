@@ -8,7 +8,6 @@ import java.io.ObjectOutputStream;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -19,11 +18,10 @@ public final class InsecureTextIntegrationTest {
     public static void main(String[] args) throws Exception {
         // 5000 doluysa mevcut sürece dokunmadan testi durdur.
         try (ServerSocket probe = new ServerSocket(5000)) { }
-        Path log = Files.createTempFile("kriptoloji-server-test-", ".log");
         String java = Path.of(System.getProperty("java.home"), "bin", "java.exe").toString();
         Process server = new ProcessBuilder(java, "-Dstdout.encoding=UTF-8", "-cp",
                 System.getProperty("java.class.path"), "server.Server")
-                .redirectErrorStream(true).redirectOutput(log.toFile()).start();
+                .redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start();
         try {
             waitForServer(server);
             BlockingQueue<String> client2Messages = new LinkedBlockingQueue<>();
@@ -65,7 +63,6 @@ public final class InsecureTextIntegrationTest {
         } finally {
             server.destroy();
             if (!server.waitFor(3, TimeUnit.SECONDS)) server.destroyForcibly().waitFor(3, TimeUnit.SECONDS);
-            Files.deleteIfExists(log);
         }
     }
 
