@@ -92,7 +92,11 @@ public class Client2 extends JFrame {
         securityControls.add(new JLabel("Şifreleme:")); securityControls.add(cmbCryptoMode);
         securityControls.add(new JLabel("Ortak parola:")); securityControls.add(txtPassphrase);
         controls.add(networkControls, BorderLayout.NORTH);
-        controls.add(securityControls, BorderLayout.SOUTH);
+        JPanel securityPanel = new JPanel(new BorderLayout(0, 4));
+        securityPanel.add(securityControls, BorderLayout.NORTH);
+        securityPanel.add(new JLabel("AES için iki uçta aynı test parolası kullanılır; PDF şifrelenmez."),
+                BorderLayout.SOUTH);
+        controls.add(securityPanel, BorderLayout.SOUTH);
         connectionPanel.add(controls, BorderLayout.NORTH);
 
         JPanel statusPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 10));
@@ -223,7 +227,7 @@ public class Client2 extends JFrame {
                     }
                     connection = opened;
                     listener.session = opened;
-                    setStatus("Bağlı - " + host + ":" + port, true);
+                    setStatus("Bağlı - " + host + ":" + port + " | " + mode, true);
                     append(txtIncoming, "[Sunucu] Mod: " + mode);
                     updateControls();
                     opened.startReceiving();
@@ -276,7 +280,7 @@ public class Client2 extends JFrame {
                         txtMessage.requestFocusInWindow();
                     }
                 });
-            } catch (IOException e) {
+            } catch (IOException | RuntimeException e) {
                 SwingUtilities.invokeLater(() -> {
                     if (connection == current) {
                         sending = false;

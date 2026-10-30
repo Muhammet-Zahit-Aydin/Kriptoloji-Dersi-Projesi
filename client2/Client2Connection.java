@@ -14,6 +14,7 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
+import java.io.UTFDataFormatException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketException;
@@ -74,7 +75,14 @@ public final class Client2Connection implements AutoCloseable {
 
     public void sendText(String text) throws IOException {
         if(text==null||text.isBlank()) throw new IllegalArgumentException("Boş mesaj gönderilemez.");
-        writeFrame(SecureFrameCodec.encode(new Message(MessageType.TEXT,CLIENT_ID,"Client1",text,null),cryptoMode,password));
+        String frame;
+        try {
+            frame = SecureFrameCodec.encode(new Message(MessageType.TEXT,CLIENT_ID,"Client1",text,null),cryptoMode,password);
+        } catch (IllegalArgumentException e) {
+            if (e.getCause() instanceof UTFDataFormatException) throw frameLimitError();
+            throw new IOException("Metin kodlanamadı: " + e.getMessage(), e);
+        }
+        writeFrame(frame);
     }
 
     public void sendPdf(Path path,BiConsumer<FileTransfer.Start,Long> progress) throws IOException {
@@ -90,9 +98,14 @@ public final class Client2Connection implements AutoCloseable {
 
     private void writeFrame(String frame) throws IOException {
         try(DataOutputStream check=new DataOutputStream(new ByteArrayOutputStream())) { check.writeUTF(frame); }
+        catch (UTFDataFormatException e) { throw frameLimitError(); }
         try {
             synchronized(out) { if(closed.get()) throw new IOException("Sunucu bağlantısı kapalı."); out.writeUTF(frame); out.flush(); }
         } catch(IOException e) { disconnect("Mesaj gönderilemedi: "+e.getMessage()); throw e; }
+    }
+
+    private static UTFDataFormatException frameLimitError() {
+        return new UTFDataFormatException("Mesaj 65.535 byte taşıma sınırını aşıyor. Daha kısa bir metin girin.");
     }
 
     private void receiveLoop() {

@@ -3,6 +3,7 @@ package tests;
 import client2.Client2Connection;
 import common.*;
 import common.FileTransferReceiver.ReceivedFile;
+import common.crypto.CryptoMode;
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
@@ -51,7 +52,10 @@ public final class Client2ConnectionTest {
             });
         }
         Client2Connection connect(Events events) throws IOException {
-            return Client2Connection.connect(server.getInetAddress().getHostAddress(), server.getLocalPort(), events);
+            return connect(events, CryptoMode.INSECURE, null);
+        }
+        Client2Connection connect(Events events, CryptoMode mode, String password) throws IOException {
+            return Client2Connection.connect(server.getInetAddress().getHostAddress(), server.getLocalPort(), events, mode, password);
         }
         void await() throws Exception { finished.get(10, TimeUnit.SECONDS); }
         public void close() throws IOException {
@@ -62,6 +66,8 @@ public final class Client2ConnectionTest {
 
     public static void main(String[] args) throws Exception {
         textAndLimits();
+        encryptedTextAndLimits();
+        invalidEncryptedText();
         pdfSendReceiveAndSave();
         incompleteAndInvalidPdf();
         fileContractValidation();
@@ -69,6 +75,92 @@ public final class Client2ConnectionTest {
         invalidAddress();
         System.out.println("PASS: UTF text, Turkish/emoji/NUL, frame limit, disconnect and reconnect.");
         System.out.println("PASS: PDF START/CHUNK/END, progress, save, binary equality and invalid/incomplete transfers.");
+        System.out.println("PASS: Client-2 AES-GCM/manual CBC, Turkish/emoji/NUL, long/empty text, wrong password and tamper rejection.");
+    }
+
+    private static void encryptedTextAndLimits() throws Exception {
+        String password = "yalnızca-test-445876";
+        String[] texts = {TEXT, TEXT, "İğ".repeat(6000), "\u001eKRIPTO1:Türkçe metin", TEXT};
+        for (CryptoMode mode : new CryptoMode[] {CryptoMode.AES_128_GCM, CryptoMode.AES_128_CBC_MANUAL}) {
+            // Boş girdi ortak AES servisinde çözülebilir; kullanıcı gönderiminde reddedilir.
+            String empty = SecureFrameCodec.encode(new Message(MessageType.TEXT, ""), mode, password);
+            check(SecureFrameCodec.decode(empty, password).payload().equals(""), "Boş AES girdisi değişti");
+            try (Peer peer = new Peer((in, out) -> {
+                String previous = null;
+                for (int i = 0; i < texts.length; i++) {
+                    String frame = in.readUTF();
+                    check(frame.startsWith("\u001eKRIPTO1:"), "AES yerine açık metin gönderildi");
+                    check(SecureFrameCodec.decode(frame, password).payload().equals(texts[i]), "AES metni değişti");
+                    check(SecureFrameCodec.validateForRelay(frame) == null, "Sunucu şifreli metni düz metin saydı");
+                    if (i == 1) check(!frame.equals(previous), "Tekrarlanan metinde salt/IV değişmedi");
+                    previous = frame;
+                    out.writeUTF(frame);
+                    out.flush();
+                }
+                expectEof(in);
+            })) {
+                Events events = new Events();
+                try (Client2Connection connection = peer.connect(events, mode, password)) {
+                    connection.startReceiving();
+                    for (String blank : new String[] {"", " \t\n"}) {
+                        try {
+                            connection.sendText(blank);
+                            throw new AssertionError("Boş AES mesajı gönderildi");
+                        } catch (IllegalArgumentException expected) { }
+                    }
+                    for (int i = 0; i < texts.length; i++) {
+                        if (i == texts.length - 1) {
+                            try {
+                                connection.sendText("ğ".repeat(40000));
+                                throw new AssertionError("Şifreli UTF sınırı aşılabildi");
+                            } catch (UTFDataFormatException expected) { }
+                            check(events.disconnects.isEmpty(), "Uzun AES metni bağlantıyı kapattı");
+                        }
+                        connection.sendText(texts[i]);
+                        check(take(events.messages).payload().equals(texts[i]), "Client-2 AES metnini çözemedi");
+                    }
+                }
+                peer.await();
+            }
+        }
+        // İç writeUTF sınırına takılan ayrılmış önek, UI'ye IOException olarak dönmeli.
+        try (Peer peer = new Peer((in, out) -> { check(in.readUTF().equals(TEXT), "Bağlantı kullanılamadı"); expectEof(in); })) {
+            Events events = new Events();
+            try (Client2Connection connection = peer.connect(events)) {
+                try {
+                    connection.sendText("\u001eKRIPTO1:" + "x".repeat(65535));
+                    throw new AssertionError("İç metin sınırı aşılabildi");
+                } catch (IOException expected) { }
+                check(events.disconnects.isEmpty(), "Yerel kodlama hatası bağlantıyı kapattı");
+                connection.sendText(TEXT);
+            }
+            peer.await();
+        }
+    }
+
+    private static void invalidEncryptedText() throws Exception {
+        String prefix = "\u001eKRIPTO1:";
+        for (CryptoMode mode : new CryptoMode[] {CryptoMode.AES_128_GCM, CryptoMode.AES_128_CBC_MANUAL}) {
+            String valid = SecureFrameCodec.encode(new Message(MessageType.TEXT, TEXT), mode, "test-parolası");
+            byte[] modified = Base64.getDecoder().decode(valid.substring(prefix.length()));
+            modified[modified.length - 1] ^= 1;
+            String corrupted = prefix + Base64.getEncoder().encodeToString(modified);
+            for (boolean tampered : new boolean[] {false, true}) {
+                try (Peer peer = new Peer((in, out) -> {
+                    out.writeUTF(tampered ? corrupted : valid);
+                    out.flush();
+                    expectEof(in);
+                })) {
+                    Events events = new Events();
+                    try (Client2Connection connection = peer.connect(events, mode, tampered ? "test-parolası" : "yanlış-parola")) {
+                        connection.startReceiving();
+                        check(take(events.disconnects).contains("Mesaj alınamadı"), "AES hatası bildirilmedi");
+                        check(events.messages.isEmpty(), "Doğrulanmamış AES metni ekrana iletildi");
+                    }
+                    peer.await();
+                }
+            }
+        }
     }
 
     private static void textAndLimits() throws Exception {

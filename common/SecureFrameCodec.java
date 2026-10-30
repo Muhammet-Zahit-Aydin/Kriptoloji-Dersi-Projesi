@@ -105,10 +105,10 @@ public final class SecureFrameCodec {
         } catch (IllegalArgumentException | java.io.EOFException e) { throw new IOException("Bozuk mesaj çerçevesi.",e); }
     }
 
-    /** Validates the shared wire shape without needing the receiver's secret key. */
-    public static void validateForRelay(String frame) throws IOException {
+    /** Validates the wire shape; returns plain packets, or null for protected text. */
+    public static Message validateForRelay(String frame) throws IOException {
         if (frame == null) throw new IOException("Boş çerçeve.");
-        if (!frame.startsWith(PREFIX)) return;
+        if (!frame.startsWith(PREFIX)) return new Message(MessageType.TEXT, frame);
         byte[] bytes;
         try { bytes=Base64.getDecoder().decode(frame.substring(PREFIX.length())); }
         catch(IllegalArgumentException e) { throw new IOException("Bozuk Base64 çerçevesi.",e); }
@@ -121,10 +121,10 @@ public final class SecureFrameCodec {
                 if(length<1||length>in.available()-trailer) throw new IOException("Şifreli içerik uzunluğu geçersiz.");
                 in.skipNBytes(length);
                 if(in.available()!=trailer) throw new IOException("Şifreli pakette fazladan veya eksik veri var.");
-                return;
+                return null;
             }
         } catch(java.io.EOFException e) { throw new IOException("Eksik çerçeve.",e); }
-        decode(frame);
+        return decode(frame);
     }
     private static Message decodeProtected(DataInputStream in, byte[] complete, int kind, String password) throws IOException {
         if (password == null || password.isBlank()) throw new IOException("Şifreli mesaj için aynı parola gerekli.");

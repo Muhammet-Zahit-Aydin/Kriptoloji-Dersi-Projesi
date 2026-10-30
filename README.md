@@ -30,9 +30,14 @@ dosya bağlantı koptuktan sonra da kaydedilebilir. Pencere kapatıldığında g
 kopyalar temizlenir.
 
 Client-1 ve Client-2, aynı dosya sözleşmesini kullanarak PDF seçme, gönderme, alma
-ve kaydetme işlemlerini yapar. Sunucu dosyayı diske kaydetmez; dosya paketlerini
-bağlı istemcilere iletir. Gönderim tamamlandı bildirimi alıcının dosyayı kaydettiği
-anlamına gelmez.
+ve kaydetme işlemlerini yapar. Sunucu her gönderen bağlantısı için dosya boyutunu,
+kimliğini ve parça sırasını ortak alıcıyla doğrular. Tamamlanan PDF'nin kopyası,
+sunucunun başlatıldığı dizindeki `server-files/<fileId>.pdf` konumuna kaydedilir;
+özgün adı, boyutu ve kayıt yolu sunucu terminalinde gösterilir. Dosya adının yerine
+UUID kullanıldığı için istemci kayıt yolunu belirleyemez. Mevcut kopya ezilmez;
+eksik/bozuk dosya tamamlanmış olarak kaydedilmez. Kayıtlar Git'e dahil değildir.
+Testler `-Dkriptoloji.server.files=<dizin>` ile ayrı bir geçici kayıt dizini kullanır.
+Gönderim tamamlandı bildirimi alıcının dosyayı kaydettiği anlamına gelmez.
 
 ### Ortak dosya sözleşmesi
 
@@ -90,6 +95,9 @@ Client-2 aynı ortak aktarım bileşenlerini kullanır.
 Sunucu şifreli içeriği çözmez; ortak çerçeve biçimini yapısal olarak doğrular ve
 paketi diğer istemciye aktarır. Parola bu sürümde kullanıcılar arasında güvenli bir
 anahtar değişimiyle paylaşılmaz; iki uçta elle aynı parolanın girilmesi gerekir.
+Bu parola akışı yalnızca geçici AES entegrasyon testi içindir; nihai anahtar
+dağıtımı değildir. Her istemciye ayrı AES oturumu ve sunucuda çözme/yeniden
+şifreleme akışı henüz uygulanmamıştır.
 
 Paroladan her mesaj için 16 byte AES anahtarı, 16 byte rastgele salt ile
 `PBKDF2WithHmacSHA256` ve 120.000 tur kullanılarak türetilir. Şifreli çerçeveler
@@ -109,6 +117,13 @@ AES seçildiğinde yalnızca metin şifrelenir. PDF aktarımı ve güvensiz kip 
 İç metin UTF-8 olarak kodlanır. Güvensiz modun `writeUTF` taşıması Java modified
 UTF-8 biçimini kullanır ve çerçeve başına 65.535 byte sınırına tabidir.
 
+Client-2 bağlantı durumunda seçilen AES kipini gösterir; çözülen metin **Gelen**
+alanına yazılır. Boş/yalnızca boşluk içeren metin gönderilmez. Türkçe, emoji ve
+NUL içeren metin korunur. Taşıma sınırını aşan metin yerelde reddedilir;
+bağlantı açık ve gönderme alanı kullanılabilir kalır. Yanlış parola veya
+değiştirilmiş şifreli paket alımında hata gösterilir, bağlantı kapatılır ve
+doğrulanmamış içerik metin alanına aktarılmaz.
+
 ### Derleme ve test
 
 JDK 25 gereklidir. `java -version` ve `javac -version` çıktılarının ikisinin de
@@ -121,11 +136,16 @@ java -cp out tests.InsecureTextIntegrationTest
 java -cp out tests.ManualAes128Test
 ```
 
-İlk test UTF metni ve PDF sözleşmesini bir test eşiyle doğrular. İkinci test
-5000 portunda kendi gerçek `server.Server` sürecini başlatır; Client-1'in UTF
-biçimiyle çift yönlü metni ve Client-2'nin yeniden bağlantısını dener, ardından
-yalnızca kendi sunucusunu kapatır. Testten önce 5000 portundaki kendi sunucunuzu
-durdurun.
+İlk test UTF metni, PDF sözleşmesini ve Client-2'nin AES-GCM/manuel AES-CBC
+alım/gönderimini bir test eşiyle doğrular. Boş/uzun/Türkçe metin, yanlış parola
+ve değiştirilmiş şifreli paket de denenir. İkinci test 5000 portunda kendi gerçek
+`server.Server` sürecini başlatır; Client-1'in kullandığı UTF, codec ve dosya
+bileşenleriyle çift yönlü güvensiz/AES metni, yeniden bağlantıyı ve güvensiz PDF'yi
+doğrular. Her PDF yönünde kaynak/sunucu/alıcı kopyalarının byte boyutu, byte
+içeriği ve SHA-256 özeti karşılaştırılır; sonuçlar terminale yazılır. Sırasız
+parçanın sunucu tarafından reddedildiği de kontrol edilir. Bu test GUI tıklamalarını
+çalıştırmaz. Test sonunda yalnızca kendi sunucusu ve geçici dosyaları temizlenir.
+Testten önce 5000 portundaki kendi sunucunuzu durdurun.
 
 Bu bilgisayarda test için indirilen taşınabilir Java 25'i seçmek için aşağıdaki
 komutları kullanın. `tmp/` Git'e dahil değildir; bu JDK temiz bir klonla gelmez.
@@ -145,6 +165,18 @@ Elle denemek için ayrı terminallerde `java -cp out server.Server`,
 İki istemcide `127.0.0.1:5000` ile bağlanıp Türkçe metni iki yönde gönderin.
 AES kiplerini denemek için ikisinde de aynı modu ve ortak parolayı seçin. PDF seçip
 karşı istemcide kaydedin. Sistemin varsayılanı Java 25 değilse yukarıdaki `java.exe` yolunu kullanın.
+
+PDF bütünlüğünü elle kontrol etmek için kaynak PDF'yi, terminalde belirtilen
+`server-files/<fileId>.pdf` kopyasını ve alıcının kaydettiği PDF'yi karşılaştırın:
+
+```powershell
+$copies = @('C:\PDF\kaynak.pdf', '.\server-files\DOSYA-KIMLIGI.pdf', 'C:\PDF\alinan.pdf')
+Get-Item -LiteralPath $copies | Select-Object FullName, Length
+Get-FileHash -LiteralPath $copies -Algorithm SHA256
+```
+
+Örnek yolları kendi dosyalarınızla değiştirin. Üç boyut ve üç özet aynı olmalıdır;
+aynı kontrolü ters yöndeki PDF gönderimi için de yapın.
 
 ## 🌐 Yerel Ağ (LAN) Üzerinde Bağlantı ve Güvenlik Duvarı Ayarları
 
