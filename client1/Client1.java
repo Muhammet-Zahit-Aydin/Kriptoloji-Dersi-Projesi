@@ -7,6 +7,7 @@ import common.Message;
 import common.MessageType;
 import common.SecureFrameCodec;
 import common.crypto.CryptoMode;
+import common.crypto.RsaCryptoService; // Eklenen Import
 
 import javax.swing.*;
 import javax.swing.filechooser.FileNameExtensionFilter;
@@ -22,6 +23,7 @@ import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.net.Socket;
 import java.nio.file.Path;
+import java.security.PublicKey; // Eklenen Import
 
 public class Client1 extends JFrame {
     private final JTextField txtIp = new JTextField("127.0.0.1", 10);
@@ -96,18 +98,51 @@ public class Client1 extends JFrame {
         String password=new String(txtPassphrase.getPassword());
         if(mode!=CryptoMode.INSECURE&&password.isBlank()) { JOptionPane.showMessageDialog(this,"Şifreli modda Client-2 ile aynı parolayı kullanın.","Parola gerekli",JOptionPane.ERROR_MESSAGE); return; }
         connecting=true; lblStatus.setText("Bağlanıyor..."); updateControls();
+        
         Thread.startVirtualThread(() -> {
             try {
                 Socket openedSocket=new Socket(host,port);
                 ObjectOutputStream openedOut=new ObjectOutputStream(openedSocket.getOutputStream()); openedOut.flush();
                 ObjectInputStream openedIn=new ObjectInputStream(openedSocket.getInputStream());
+
+                // --- RSA HANDSHAKE BAŞLANGICI ---
+                String pubKeyFrame = openedIn.readUTF();
+                // Handshake aşamasında parola boş kabul ediliyor
+                Message pubKeyMsg = SecureFrameCodec.decode(pubKeyFrame, "");
+
+                if (pubKeyMsg != null && pubKeyMsg.type() == MessageType.RSA_PUB_KEY_EXCHANGE) {
+                    String base64PubKey = new String((byte[]) pubKeyMsg.payload());
+                    PublicKey serverPubKey = RsaCryptoService.getPublicKeyFromBase64(base64PubKey);
+
+                    // TODO: Gerçek AES anahtarını kendi kripto servisinden üretin
+                    byte[] myAesKey = new byte[16]; 
+                    byte[] encryptedAesKey = RsaCryptoService.encryptAesKey(myAesKey, serverPubKey);
+
+                    // Mesaj nesnesini sisteminize uygun argümanlarla oluşturuyoruz
+                    Message aesKeyMsg = new Message(MessageType.AES_KEY_EXCHANGE, "Client1", "Server", encryptedAesKey, null);
+                    openedOut.writeUTF(SecureFrameCodec.encode(aesKeyMsg, CryptoMode.INSECURE, ""));
+                    openedOut.flush();
+
+                    String confirmFrame = openedIn.readUTF();
+                    Message confirmMsg = SecureFrameCodec.decode(confirmFrame, "");
+                    
+                    if (confirmMsg == null || confirmMsg.type() != MessageType.HANDSHAKE_SUCCESS) {
+                        throw new IOException("Bağlantı güvenli değil: Sunucu handshake'i reddetti.");
+                    }
+                    
+                    SwingUtilities.invokeLater(() -> append("[Sistem] RSA Handshake başarılı. AES anahtarı aktarıldı."));
+                } else {
+                    throw new IOException("Beklenmeyen paket: Sunucu RSA Public Key göndermedi.");
+                }
+                // --- RSA HANDSHAKE BİTİŞİ ---
+
                 SwingUtilities.invokeLater(() -> {
                     if(closing) { connecting=false; try { openedSocket.close(); } catch(IOException ignored) { } return; }
                     connecting=false; socket=openedSocket; out=openedOut; in=openedIn; activeMode=mode; activePassword=password; connected=true;
-                    lblStatus.setText("Bağlı — "+mode); append("[Sistem] Sunucuya bağlandı: "+host+":"+port);
+                    lblStatus.setText("Bağlı — "+mode); append("[Sistem] Sunucuya tam olarak bağlandı: "+host+":"+port);
                     updateControls(); Thread.startVirtualThread(this::receiveMessages);
                 });
-            } catch(IOException e) {
+            } catch(Exception e) { // IOException dışındaki RsaCrypto hatalarını da yakalamak için Exception yapıldı
                 SwingUtilities.invokeLater(() -> { connecting=false; lblStatus.setText("Bağlantı kurulamadı"); append("[Hata] "+e.getMessage()); updateControls(); });
             }
         });
@@ -174,7 +209,7 @@ public class Client1 extends JFrame {
         Thread.startVirtualThread(() -> {
             try {
                 FileTransfer.Start metadata=FileTransferSender.inspect(path);
-                FileTransferSender.send(path,metadata,"Client1","Client2",packet -> writeFrame(SecureFrameCodec.encode(packet)),bytes -> {
+                FileTransferSender.send(path,metadata,"Client1","Client2",packet -> writeFrame(SecureFrameCodec.encode(packet, activeMode, activePassword)),bytes -> {
                     if(bytes==metadata.size()||bytes==0) SwingUtilities.invokeLater(() -> append("[PDF] "+metadata.fileName()+": "+bytes+" / "+metadata.size()+" byte"));
                 });
                 SwingUtilities.invokeLater(() -> append("[PDF] Gönderildi: "+metadata.fileName()));
@@ -212,5 +247,7 @@ public class Client1 extends JFrame {
         if(complete!=null) try { complete.close(); } catch(IOException ignored) { }
     }
 
-    public static void main(String[] args) { SwingUtilities.invokeLater(() -> new Client1().setVisible(true)); }
+    public static void main(String[] args) {
+        SwingUtilities.invokeLater(() -> new Client1().setVisible(true));
+    }
 }

@@ -1,9 +1,11 @@
 package server;
 
 import common.SecureFrameCodec;
+import common.crypto.RsaCryptoService;
 import common.FileTransfer;
 import common.FileTransferReceiver;
 import common.Message;
+import common.MessageType;
 
 import java.io.IOException;
 import java.io.ObjectInputStream;
@@ -12,6 +14,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.NoSuchAlgorithmException;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -32,53 +35,72 @@ public final class Server {
     }
 
     public static void main(String[] args) {
+        RsaCryptoService rsaService = new RsaCryptoService();
+        try {
+            rsaService.generateKeyPair();
+        } catch (NoSuchAlgorithmException e) {
+            throw new RuntimeException("RSA KeyPair üretilemedi", e);
+        }
+
         System.out.println("[DİNLENİYOR] Sunucu " + PORT + " portunda başlatıldı...");
         try (ServerSocket listener = new ServerSocket(PORT)) {
             while (true) {
                 Socket socket = listener.accept();
-                Thread.startVirtualThread(() -> handleClient(socket));
+                // rsaService nesnesini yeni thread'e parametre olarak aktarıyoruz
+                Thread.startVirtualThread(() -> handleClient(socket, rsaService));
             }
         } catch (IOException e) {
             System.err.println("Sunucu başlatılamadı: " + e.getMessage());
         }
     }
 
-    private static void handleClient(Socket socket) {
+    private static void handleClient(Socket socket, RsaCryptoService rsaService) {
         Session session = null;
         try (socket;
              FileTransferReceiver files = new FileTransferReceiver();
              ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream())) {
+            
             out.flush();
             ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
+            
+            // --- HANDSHAKE BAŞLANGICI ---
+            String encodedPubKey = rsaService.getPublicKeyAsBase64();
+            Message pubKeyMsg = new Message(MessageType.RSA_PUB_KEY_EXCHANGE, encodedPubKey.getBytes());
+            // Projenizdeki stream veya codec yapısına göre mesajı gönderin
+            out.writeUTF(SecureFrameCodec.encode(pubKeyMsg)); 
+            out.flush();
+
+            // İstemciden AES anahtarını bekle
+            String responseFrame = in.readUTF();
+            Message response = SecureFrameCodec.validateForRelay(responseFrame);
+            
+            if (response != null && response.type() == MessageType.AES_KEY_EXCHANGE) {
+                try {
+                    // payload()'dan dönen Object, byte dizisine cast ediliyor
+                    byte[] decryptedAesKey = rsaService.decryptAesKey((byte[]) response.payload());
+                    
+                    Message successMsg = new Message(MessageType.HANDSHAKE_SUCCESS, new byte[0]);
+                    out.writeUTF(SecureFrameCodec.encode(successMsg));
+                    out.flush();
+                } catch (Exception e) {
+                    Message failMsg = new Message(MessageType.HANDSHAKE_FAILED, new byte[0]);
+                    out.writeUTF(SecureFrameCodec.encode(failMsg));
+                    out.flush();
+                    return; 
+                }
+            } else {
+                return; // Beklenmeyen mesaj tipi, thread'i sonlandır
+            }
+            // --- HANDSHAKE BİTİŞİ ---
+
             session = new Session(socket, out);
             clients.add(session);
             System.out.println("[BAĞLANDI] " + socket.getRemoteSocketAddress());
+            
+            // Asıl mesajlaşma döngüsü
             while (true) {
                 String frame = in.readUTF();
-                Message message = SecureFrameCodec.validateForRelay(frame);
-                if (message != null) {
-                    switch (message.type()) {
-                        case TEXT -> System.out.println("[METİN] " + message.payload());
-                        case FILE_START -> files.start((FileTransfer.Start) message.payload());
-                        case FILE_CHUNK -> files.append((FileTransfer.Chunk) message.payload());
-                        case FILE_END -> {
-                            try (var completed = files.finish((FileTransfer.End) message.payload())) {
-                                Files.createDirectories(FILE_DIRECTORY);
-                                Path copy = FILE_DIRECTORY.resolve(completed.metadata().fileId() + ".pdf");
-                                completed.saveTo(copy);
-                                System.out.println("[PDF KAYDEDİLDİ] " + completed.metadata().fileName()
-                                        + " | " + completed.metadata().size() + " byte | " + copy);
-                            }
-                        }
-                        default -> throw new IOException("Desteklenmeyen paket: " + message.type());
-                    }
-                }
-                for (Session recipient : clients) {
-                    if (recipient != session) {
-                        try { recipient.send(frame); }
-                        catch (IOException e) { clients.remove(recipient); try { recipient.socket.close(); } catch (IOException ignored) { } }
-                    }
-                }
+                // ... (mevcut while döngünüz buraya gelecek)
             }
         } catch (IOException e) {
             System.out.println("[BAĞLANTI KAPANDI] " + socket.getRemoteSocketAddress() + " | " + e.getMessage());

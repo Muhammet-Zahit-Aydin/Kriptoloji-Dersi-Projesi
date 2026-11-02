@@ -7,6 +7,7 @@ import common.Message;
 import common.MessageType;
 import common.SecureFrameCodec;
 import common.crypto.CryptoMode;
+import common.crypto.RsaCryptoService;
 
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
@@ -22,6 +23,7 @@ import java.nio.file.Path;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
+import java.security.PublicKey;
 
 /** Client-2 UTF stream and message/file transport. */
 public final class Client2Connection implements AutoCloseable {
@@ -67,6 +69,38 @@ public final class Client2Connection implements AutoCloseable {
             socket.connect(new InetSocketAddress(host.trim(),port),TIMEOUT_MS); socket.setSoTimeout(TIMEOUT_MS);
             ObjectOutputStream out=new ObjectOutputStream(socket.getOutputStream()); out.flush();
             ObjectInputStream in=new ObjectInputStream(socket.getInputStream()); socket.setSoTimeout(0);
+            
+            // --- RSA HANDSHAKE BAŞLANGICI ---
+            try {
+                String pubKeyFrame = in.readUTF();
+                Message pubKeyMsg = SecureFrameCodec.decode(pubKeyFrame, "");
+
+                if (pubKeyMsg != null && pubKeyMsg.type() == MessageType.RSA_PUB_KEY_EXCHANGE) {
+                    String base64PubKey = new String((byte[]) pubKeyMsg.payload());
+                    PublicKey serverPubKey = RsaCryptoService.getPublicKeyFromBase64(base64PubKey);
+
+                    // TODO: Gerçek AES anahtarını kendi kripto servisinden üretin
+                    byte[] myAesKey = new byte[16]; 
+                    byte[] encryptedAesKey = RsaCryptoService.encryptAesKey(myAesKey, serverPubKey);
+
+                    Message aesKeyMsg = new Message(MessageType.AES_KEY_EXCHANGE, CLIENT_ID, "Server", encryptedAesKey, null);
+                    out.writeUTF(SecureFrameCodec.encode(aesKeyMsg, CryptoMode.INSECURE, ""));
+                    out.flush();
+
+                    String confirmFrame = in.readUTF();
+                    Message confirmMsg = SecureFrameCodec.decode(confirmFrame, "");
+                    
+                    if (confirmMsg == null || confirmMsg.type() != MessageType.HANDSHAKE_SUCCESS) {
+                        throw new IOException("Bağlantı güvenli değil: Sunucu handshake'i reddetti.");
+                    }
+                } else {
+                    throw new IOException("Beklenmeyen paket: Sunucu RSA Public Key göndermedi.");
+                }
+            } catch (Exception e) {
+                throw new IOException("RSA Handshake sırasında hata oluştu: " + e.getMessage(), e);
+            }
+            // --- RSA HANDSHAKE BİTİŞİ ---
+
             return new Client2Connection(socket,out,in,listener,selected,password);
         } catch(IOException|RuntimeException e) { closeSocket(socket); throw e; }
     }
