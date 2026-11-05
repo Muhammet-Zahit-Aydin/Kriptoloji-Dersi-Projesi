@@ -94,7 +94,7 @@ public class Client2 extends JFrame {
         controls.add(networkControls, BorderLayout.NORTH);
         JPanel securityPanel = new JPanel(new BorderLayout(0, 4));
         securityPanel.add(securityControls, BorderLayout.NORTH);
-        securityPanel.add(new JLabel("AES için iki uçta aynı test parolası kullanılır; PDF şifrelenmez."),
+        securityPanel.add(new JLabel("Bağlantı AES-GCM ile korunur; bu seçim metne ek şifreleme uygular."),
                 BorderLayout.SOUTH);
         controls.add(securityPanel, BorderLayout.SOUTH);
         connectionPanel.add(controls, BorderLayout.NORTH);

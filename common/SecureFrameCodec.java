@@ -31,6 +31,12 @@ public final class SecureFrameCodec {
     public static String encode(Message message, CryptoMode mode, String password) {
         if (message == null || message.type() == null) throw new IllegalArgumentException("Mesaj gerekli.");
         CryptoMode selected = mode == null ? CryptoMode.INSECURE : mode;
+        if (message.type() == MessageType.RSA_PUB_KEY_EXCHANGE || message.type() == MessageType.AES_KEY_EXCHANGE)
+            return encodeBinary(message.type() == MessageType.RSA_PUB_KEY_EXCHANGE ? (byte)7 : (byte)8,
+                    message, out -> writeByteArray(out, (byte[]) message.payload()));
+        if (message.type() == MessageType.HANDSHAKE_SUCCESS || message.type() == MessageType.HANDSHAKE_FAILED)
+            return encodeBinary(message.type() == MessageType.HANDSHAKE_SUCCESS ? (byte)9 : (byte)10,
+                    message, out -> { });
         if (message.type() == MessageType.TEXT && selected != CryptoMode.INSECURE)
             return encodeProtectedText((String) message.payload(), message.senderId(), message.targetId(), selected, password);
         if (message.type() == MessageType.TEXT) {
@@ -97,6 +103,10 @@ public final class SecureFrameCodec {
                     }
                     case 3 -> new Message(MessageType.FILE_END,sender,target,new FileTransfer.End(readUuid(in),in.readInt()),null);
                     case 4 -> new Message(MessageType.TEXT,sender,target,in.readUTF(),null);
+                    case 7 -> new Message(MessageType.RSA_PUB_KEY_EXCHANGE,sender,target,readByteArray(in),null);
+                    case 8 -> new Message(MessageType.AES_KEY_EXCHANGE,sender,target,readByteArray(in),null);
+                    case 9 -> new Message(MessageType.HANDSHAKE_SUCCESS,sender,target,new byte[0],null);
+                    case 10 -> new Message(MessageType.HANDSHAKE_FAILED,sender,target,new byte[0],null);
                     default -> throw new IOException("Bilinmeyen çerçeve türü.");
                 };
                 if (in.available()!=0) throw new IOException("Çerçevede fazladan veri var.");
@@ -185,4 +195,13 @@ public final class SecureFrameCodec {
     private static String readNullable(DataInputStream in) throws IOException { String v=in.readUTF(); return v.isEmpty()?null:v; }
     private static void writeUuid(DataOutputStream out,java.util.UUID id) throws IOException { out.writeLong(id.getMostSignificantBits()); out.writeLong(id.getLeastSignificantBits()); }
     private static java.util.UUID readUuid(DataInputStream in) throws IOException { return new java.util.UUID(in.readLong(),in.readLong()); }
+    private static void writeByteArray(DataOutputStream out,byte[] value) throws IOException {
+        if(value==null||value.length>4096) throw new IOException("Anahtar paketi geçersiz.");
+        out.writeInt(value.length); out.write(value);
+    }
+    private static byte[] readByteArray(DataInputStream in) throws IOException {
+        int length=in.readInt();
+        if(length<1||length>4096||length>in.available()) throw new IOException("Anahtar paketi geçersiz.");
+        return in.readNBytes(length);
+    }
 }

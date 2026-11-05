@@ -7,7 +7,8 @@ import common.Message;
 import common.MessageType;
 import common.SecureFrameCodec;
 import common.crypto.CryptoMode;
-import common.crypto.RsaCryptoService; // Eklenen Import
+import common.crypto.AesSessionFrameCodec;
+import common.crypto.RsaSessionHandshake;
 
 import javax.swing.*;
 import javax.swing.filechooser.FileNameExtensionFilter;
@@ -23,7 +24,6 @@ import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.net.Socket;
 import java.nio.file.Path;
-import java.security.PublicKey; // Eklenen Import
 
 public class Client1 extends JFrame {
     private final JTextField txtIp = new JTextField("127.0.0.1", 10);
@@ -50,6 +50,7 @@ public class Client1 extends JFrame {
     private volatile FileTransferReceiver.ReceivedFile receivedFile;
     private CryptoMode activeMode = CryptoMode.INSECURE;
     private String activePassword;
+    private volatile byte[] sessionKey;
 
     public Client1() {
         setTitle("Client-1 (Hüseyin) - Metin / PDF / AES");
@@ -100,56 +101,35 @@ public class Client1 extends JFrame {
         connecting=true; lblStatus.setText("Bağlanıyor..."); updateControls();
         
         Thread.startVirtualThread(() -> {
+            Socket pendingSocket = null;
             try {
-                Socket openedSocket=new Socket(host,port);
-                ObjectOutputStream openedOut=new ObjectOutputStream(openedSocket.getOutputStream()); openedOut.flush();
-                ObjectInputStream openedIn=new ObjectInputStream(openedSocket.getInputStream());
+                pendingSocket=new Socket(host,port);
+                pendingSocket.setSoTimeout(5000);
+                ObjectOutputStream openedOut=new ObjectOutputStream(pendingSocket.getOutputStream()); openedOut.flush();
+                ObjectInputStream openedIn=new ObjectInputStream(pendingSocket.getInputStream());
 
-                // --- RSA HANDSHAKE BAŞLANGICI ---
-                String pubKeyFrame = openedIn.readUTF();
-                // Handshake aşamasında parola boş kabul ediliyor
-                Message pubKeyMsg = SecureFrameCodec.decode(pubKeyFrame, "");
+                // Bağlantı anahtarı ve ACK gelmeden gönderime açılmaz.
+                byte[] openedSessionKey = RsaSessionHandshake.connect(openedIn, openedOut, "Client1");
+                pendingSocket.setSoTimeout(0);
+                SwingUtilities.invokeLater(() -> append("[Sistem] RSA el sıkışması ACK ile tamamlandı."));
 
-                if (pubKeyMsg != null && pubKeyMsg.type() == MessageType.RSA_PUB_KEY_EXCHANGE) {
-                    String base64PubKey = new String((byte[]) pubKeyMsg.payload());
-                    PublicKey serverPubKey = RsaCryptoService.getPublicKeyFromBase64(base64PubKey);
-
-                    // TODO: Gerçek AES anahtarını kendi kripto servisinden üretin
-                    byte[] myAesKey = new byte[16]; 
-                    byte[] encryptedAesKey = RsaCryptoService.encryptAesKey(myAesKey, serverPubKey);
-
-                    // Mesaj nesnesini sisteminize uygun argümanlarla oluşturuyoruz
-                    Message aesKeyMsg = new Message(MessageType.AES_KEY_EXCHANGE, "Client1", "Server", encryptedAesKey, null);
-                    openedOut.writeUTF(SecureFrameCodec.encode(aesKeyMsg, CryptoMode.INSECURE, ""));
-                    openedOut.flush();
-
-                    String confirmFrame = openedIn.readUTF();
-                    Message confirmMsg = SecureFrameCodec.decode(confirmFrame, "");
-                    
-                    if (confirmMsg == null || confirmMsg.type() != MessageType.HANDSHAKE_SUCCESS) {
-                        throw new IOException("Bağlantı güvenli değil: Sunucu handshake'i reddetti.");
-                    }
-                    
-                    SwingUtilities.invokeLater(() -> append("[Sistem] RSA Handshake başarılı. AES anahtarı aktarıldı."));
-                } else {
-                    throw new IOException("Beklenmeyen paket: Sunucu RSA Public Key göndermedi.");
-                }
-                // --- RSA HANDSHAKE BİTİŞİ ---
-
+                Socket readySocket = pendingSocket;
                 SwingUtilities.invokeLater(() -> {
-                    if(closing) { connecting=false; try { openedSocket.close(); } catch(IOException ignored) { } return; }
-                    connecting=false; socket=openedSocket; out=openedOut; in=openedIn; activeMode=mode; activePassword=password; connected=true;
+                    if(closing) { connecting=false; try { readySocket.close(); } catch(IOException ignored) { } return; }
+                    connecting=false; socket=readySocket; out=openedOut; in=openedIn; sessionKey=openedSessionKey; activeMode=mode; activePassword=password; connected=true;
                     lblStatus.setText("Bağlı — "+mode); append("[Sistem] Sunucuya tam olarak bağlandı: "+host+":"+port);
                     updateControls(); Thread.startVirtualThread(this::receiveMessages);
                 });
-            } catch(Exception e) { // IOException dışındaki RsaCrypto hatalarını da yakalamak için Exception yapıldı
+                pendingSocket = null; // Bağlantı artık alanlar tarafından yönetilir.
+            } catch(Exception e) { // El sıkışma hatasında yarım bağlantıyı kapat.
+                if(pendingSocket!=null) try { pendingSocket.close(); } catch(IOException ignored) { }
                 SwingUtilities.invokeLater(() -> { connecting=false; lblStatus.setText("Bağlantı kurulamadı"); append("[Hata] "+e.getMessage()); updateControls(); });
             }
         });
     }
 
     private void disconnectFromServer() {
-        connected=false; Socket current=socket; socket=null;
+        connected=false; sessionKey=null; Socket current=socket; socket=null;
         if(current!=null) try { current.close(); } catch(IOException ignored) { }
         try { fileReceiver.close(); } catch(IOException ignored) { }
         lblStatus.setText("Bağlı değil"); append("[Sistem] Bağlantı kesildi."); updateControls();
@@ -158,8 +138,10 @@ public class Client1 extends JFrame {
     private void sendMessage() {
         String text=txtMessageInput.getText(); if(!connected||text.isBlank()) return;
         String frame;
-        try { frame=SecureFrameCodec.encode(new Message(MessageType.TEXT,"Client1","Client2",text,null),activeMode,activePassword); }
-        catch(RuntimeException e) { append("[Hata] "+e.getMessage()); return; }
+        try { frame=AesSessionFrameCodec.encode(
+                SecureFrameCodec.encode(new Message(MessageType.TEXT,"Client1","Client2",text,null),activeMode,activePassword),
+                sessionKey); }
+        catch(IOException|RuntimeException e) { append("[Hata] "+e.getMessage()); return; }
         try {
             writeFrame(frame); append("Ben: "+text); txtMessageInput.setText("");
         } catch(UTFDataFormatException e) { append("[Hata] Mesaj seçilen şifreleme kipinde taşıma sınırını aşıyor.");
@@ -169,14 +151,15 @@ public class Client1 extends JFrame {
     private void writeFrame(String frame) throws IOException {
         try(DataOutputStream check=new DataOutputStream(new ByteArrayOutputStream())) { check.writeUTF(frame); }
         ObjectOutputStream current=out;
-        if(!connected||current==null) throw new IOException("Sunucu bağlantısı kapalı.");
+        if(!connected||current==null||sessionKey==null) throw new IOException("Güvenli oturum ACK'i tamamlanmadı.");
         synchronized(current) { current.writeUTF(frame); current.flush(); }
     }
 
     private void receiveMessages() {
         try {
             while(connected) {
-                String frame=in.readUTF(); Message message=SecureFrameCodec.decode(frame,activePassword);
+                String frame=AesSessionFrameCodec.decode(in.readUTF(),sessionKey);
+                Message message=SecureFrameCodec.decode(frame,activePassword);
                 if(message.type()==MessageType.TEXT) SwingUtilities.invokeLater(() -> append("Karşı Taraf: "+message.payload()));
                 else receiveFile(message);
             }
@@ -209,7 +192,8 @@ public class Client1 extends JFrame {
         Thread.startVirtualThread(() -> {
             try {
                 FileTransfer.Start metadata=FileTransferSender.inspect(path);
-                FileTransferSender.send(path,metadata,"Client1","Client2",packet -> writeFrame(SecureFrameCodec.encode(packet, activeMode, activePassword)),bytes -> {
+                FileTransferSender.send(path,metadata,"Client1","Client2",packet -> writeFrame(
+                        AesSessionFrameCodec.encode(SecureFrameCodec.encode(packet, activeMode, activePassword), sessionKey)),bytes -> {
                     if(bytes==metadata.size()||bytes==0) SwingUtilities.invokeLater(() -> append("[PDF] "+metadata.fileName()+": "+bytes+" / "+metadata.size()+" byte"));
                 });
                 SwingUtilities.invokeLater(() -> append("[PDF] Gönderildi: "+metadata.fileName()));
@@ -240,7 +224,7 @@ public class Client1 extends JFrame {
     private void append(String text) { txtMessages.append(text+"\n"); txtMessages.setCaretPosition(txtMessages.getDocument().getLength()); }
 
     private void closeAll() {
-        closing=true; connected=false; Socket current=socket; socket=null;
+        closing=true; connected=false; sessionKey=null; Socket current=socket; socket=null;
         if(current!=null) try { current.close(); } catch(IOException ignored) { }
         try { fileReceiver.close(); } catch(IOException ignored) { }
         FileTransferReceiver.ReceivedFile complete=receivedFile; receivedFile=null;

@@ -4,7 +4,7 @@ import java.io.Serializable;
 import java.util.Objects;
 import java.util.UUID;
 
-/** İki istemcinin ortak kullanacağı güvensiz PDF aktarım sözleşmesi. */
+/** İki istemcinin ortak kullanacağı PDF aktarım sözleşmesi. */
 public final class FileTransfer {
     public static final int CHUNK_SIZE = 16 * 1024;
 

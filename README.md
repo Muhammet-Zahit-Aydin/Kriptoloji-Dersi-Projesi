@@ -15,8 +15,9 @@ Masaüstü (Windows) / Java 25
 
 Her iki istemci de aynı `ObjectOutputStream` / `ObjectInputStream` üzerindeki
 `writeUTF` / `readUTF` çerçevelerini kullanır. Sunucu kayıt cevabı istemez ve
-gelen çerçeveyi diğer istemcilere aktarır. Güvensiz modda Client-1 ile Client-2
-arasında iki yönlü metin ve PDF aktarılabilir. `writeUTF`, Java'nın modified UTF-8 biçimidir;
+gelen çerçeveyi diğer istemcilere aktarır. Ek metin şifrelemesi kapalıyken de
+Client-1 ile Client-2 arasında iki yönlü metin ve PDF aktarılabilir; bağlantı
+trafiği her durumda AES-GCM oturum anahtarıyla korunur. `writeUTF`, Java'nın modified UTF-8 biçimidir;
 bir çerçevenin kodlanmış içeriği en fazla 65535 byte olabilir; bu karakter sayısı
 değildir. İki istemci de sınırı aşan metni yerelde reddeder, bağlantıyı açık tutar.
 
@@ -57,8 +58,9 @@ tablodaki kalan alanlardır. CHUNK verisinin önünde `int` byte uzunluğu bulun
 Tamsayılar `DataOutputStream` ile big-endian sırada yazılır. Normal metin aynen
 taşınır; ayrılmış önekle başlayan metin codec tarafından tür `4` ve `writeUTF`
 içerikle ayrı bir metin çerçevesinde kodlanır. PDF ve bu özel metin çerçevelerini
-çözebilmesi için her iki istemci de ortak codec'i kullanır. Güvensiz düz metin
-normal UTF çerçevesi olarak taşınır.
+çözebilmesi için her iki istemci de ortak codec'i kullanır. Ek metin şifrelemesi
+kapalıysa metin uygulama çerçevesinde düz UTF olarak kalır; ağda AES-GCM oturum
+zarfıyla korunur.
 
 `FileTransferSender` akıştan parçalar üretir; `FileTransferReceiver` tek aktif
 aktarımı geçici dosyada birleştirir. Yanlış kimlik, eksik/yinelenen/sırasız parça,
@@ -91,13 +93,17 @@ gönderir. Gelen paketleri `FileTransferReceiver` sırayla geçici dosyada topla
 tamamlanan dosya **Gelen PDF'yi Kaydet** ile seçilen hedefe kopyalanır.
 Client-2 aynı ortak aktarım bileşenlerini kullanır.
 
-İki istemcide bağlantıdan önce aynı şifreleme modu ve aynı ortak parola seçilmelidir.
-Sunucu şifreli içeriği çözmez; ortak çerçeve biçimini yapısal olarak doğrular ve
-paketi diğer istemciye aktarır. Parola bu sürümde kullanıcılar arasında güvenli bir
-anahtar değişimiyle paylaşılmaz; iki uçta elle aynı parolanın girilmesi gerekir.
-Bu parola akışı yalnızca geçici AES entegrasyon testi içindir; nihai anahtar
-dağıtımı değildir. Her istemciye ayrı AES oturumu ve sunucuda çözme/yeniden
-şifreleme akışı henüz uygulanmamıştır.
+Her bağlantıda istemci 16 byte'lık rastgele AES oturum anahtarı üretir ve sunucunun
+RSA-2048/OAEP açık anahtarıyla koruyup gönderir. Sunucu anahtarı çözer, 128 bit
+olduğunu doğrular ve ACK döndürür; istemciler ancak ACK'den sonra gönderime açılır.
+Bu anahtar her TCP bağlantısına özeldir. Uygulama çerçevelerinin tamamı (metin ve
+PDF dahil) istemci-sunucu arasında AES-128-GCM ile korunur; sunucu gönderenin
+çerçevesini doğrulayıp alıcının ayrı oturum anahtarıyla yeniden şifreler.
+
+İki uçta seçilen AES kipleri ve ortak parola, metne ek uygulama katmanı şifrelemesi
+sağlar. Bu metin katmanında iki istemcide aynı parola gerekir; sunucu AES-GCM
+oturum çerçevesini çözer fakat parola korumalı metin içeriğini çözmez. PDF dosyaları
+oturum katmanıyla aktarım sırasında şifrelenir.
 
 Paroladan her mesaj için 16 byte AES anahtarı, 16 byte rastgele salt ile
 `PBKDF2WithHmacSHA256` ve 120.000 tur kullanılarak türetilir. Şifreli çerçeveler
@@ -113,8 +119,9 @@ verinin başında taşınır. CBC tek başına bütünlük sağlamadığından �
 üretilir. GCM, uygulama kullanımında tercih edilen kiptir. Elle yazılmış blok
 şifreleme sabit zamanlı uygulama değildir; ders gösterimi içindir.
 
-AES seçildiğinde yalnızca metin şifrelenir. PDF aktarımı ve güvensiz kip şifrelenmez.
-İç metin UTF-8 olarak kodlanır. Güvensiz modun `writeUTF` taşıması Java modified
+İki istemci arasındaki seçilebilir AES kipi yalnızca metne ek şifreleme uygular;
+PDF'ler bağlantı oturum anahtarıyla şifrelenir. İç metin UTF-8 olarak kodlanır.
+`writeUTF` taşıması Java modified
 UTF-8 biçimini kullanır ve çerçeve başına 65.535 byte sınırına tabidir.
 
 Client-2 bağlantı durumunda seçilen AES kipini gösterir; çözülen metin **Gelen**
@@ -137,10 +144,12 @@ java -cp out tests.ManualAes128Test
 ```
 
 İlk test UTF metni, PDF sözleşmesini ve Client-2'nin AES-GCM/manuel AES-CBC
-alım/gönderimini bir test eşiyle doğrular. Boş/uzun/Türkçe metin, yanlış parola
+alım/gönderimini bir test eşiyle doğrular. Ayrıca RSA el sıkışmasıyla aynı sunucu
+açık anahtarından iki farklı 128 bit oturum anahtarı alındığı ve ACK gelmeden
+uygulama çerçevesi çıkmadığı denetlenir. Boş/uzun/Türkçe metin, yanlış parola
 ve değiştirilmiş şifreli paket de denenir. İkinci test 5000 portunda kendi gerçek
 `server.Server` sürecini başlatır; Client-1'in kullandığı UTF, codec ve dosya
-bileşenleriyle çift yönlü güvensiz/AES metni, yeniden bağlantıyı ve güvensiz PDF'yi
+bileşenleriyle ek parolasız/AES metni, yeniden bağlantıyı ve PDF aktarımını
 doğrular. Her PDF yönünde kaynak/sunucu/alıcı kopyalarının byte boyutu, byte
 içeriği ve SHA-256 özeti karşılaştırılır; sonuçlar terminale yazılır. Sırasız
 parçanın sunucu tarafından reddedildiği de kontrol edilir. Bu test GUI tıklamalarını

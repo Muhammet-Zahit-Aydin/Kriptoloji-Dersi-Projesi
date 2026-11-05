@@ -8,6 +8,8 @@ import common.FileTransferReceiver;
 import common.FileTransferSender;
 import common.SecureFrameCodec;
 import common.crypto.CryptoMode;
+import common.crypto.AesSessionFrameCodec;
+import common.crypto.RsaSessionHandshake;
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
@@ -53,9 +55,11 @@ public final class InsecureTextIntegrationTest {
                 ObjectOutputStream out = new ObjectOutputStream(client1.getOutputStream());
                 out.flush();
                 ObjectInputStream in = new ObjectInputStream(client1.getInputStream());
+                byte[] client1SessionKey = RsaSessionHandshake.connect(in, out, "Client1");
                 BlockingQueue<String> client1Messages = new LinkedBlockingQueue<>();
                 Thread.startVirtualThread(() -> {
-                    try { while (!client1.isClosed()) client1Messages.add(in.readUTF()); }
+                    try { while (!client1.isClosed()) client1Messages.add(
+                            AesSessionFrameCodec.decode(in.readUTF(), client1SessionKey)); }
                     catch (IOException expectedOnClose) { }
                 });
                 CryptoMode[] modes = {CryptoMode.INSECURE, CryptoMode.INSECURE,
@@ -64,7 +68,7 @@ public final class InsecureTextIntegrationTest {
                     CryptoMode mode = modes[attempt];
                     try (Client2Connection client2 = Client2Connection.connect("127.0.0.1", 5000, listener, mode, TEST_PASSWORD)) {
                         client2.startReceiving();
-                        // Sunucu ACK göndermediği için iki soketin listede olmasını veriyle doğrula.
+                        // ACK sonrasında iki oturumun yönlendirmeye katıldığını doğrula.
                         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
                         while (true) {
                             client2.sendText("SYNC");
@@ -76,11 +80,13 @@ public final class InsecureTextIntegrationTest {
                         client2.sendText(toClient1);
                         expect(client1Messages, toClient1);
                         String toClient2 = "Client1 → Client2: ığüşöç İĞÜŞÖÇ\n" + attempt;
-                        out.writeUTF(SecureFrameCodec.encode(new Message(MessageType.TEXT, "Client1", "Client2", toClient2, null),
-                                mode, TEST_PASSWORD));
+                        String applicationFrame = SecureFrameCodec.encode(
+                                new Message(MessageType.TEXT, "Client1", "Client2", toClient2, null), mode, TEST_PASSWORD);
+                        out.writeUTF(AesSessionFrameCodec.encode(applicationFrame, client1SessionKey));
                         out.flush();
                         expect(client2Messages, toClient2);
-                        if (attempt == 0) pdfRoundTrips(client2, out, client1Messages, client2Files, directory);
+                        if (attempt == 0) pdfRoundTrips(client2, out, client1SessionKey,
+                                client1Messages, client2Files, directory);
                     }
                 }
             }
@@ -96,7 +102,7 @@ public final class InsecureTextIntegrationTest {
         }
     }
 
-    private static void pdfRoundTrips(Client2Connection client2, ObjectOutputStream client1Out,
+    private static void pdfRoundTrips(Client2Connection client2, ObjectOutputStream client1Out, byte[] client1SessionKey,
             BlockingQueue<String> frames, BlockingQueue<FileTransferReceiver.ReceivedFile> files, Path directory) throws Exception {
         Path source = directory.resolve("Türkçe belge.pdf");
         Files.write(source, pdfBytes());
@@ -106,7 +112,7 @@ public final class InsecureTextIntegrationTest {
             throw new AssertionError("Client-2 gönderim ilerlemesi tamamlanmadı");
         try (FileTransferReceiver receiver = new FileTransferReceiver()) {
             while (true) {
-                Message message = SecureFrameCodec.decode(take(frames));
+            Message message = SecureFrameCodec.decode(take(frames));
                 switch (message.type()) {
                     case FILE_START -> receiver.start((FileTransfer.Start) message.payload());
                     case FILE_CHUNK -> receiver.append((FileTransfer.Chunk) message.payload());
@@ -123,7 +129,7 @@ public final class InsecureTextIntegrationTest {
         // Client-1.sendPdf aynı ortak gönderici ve codec'i kullanır.
         FileTransfer.Start metadata = FileTransferSender.inspect(source);
         FileTransferSender.send(source, metadata, "Client1", "Client2", packet -> {
-            client1Out.writeUTF(SecureFrameCodec.encode(packet));
+            client1Out.writeUTF(AesSessionFrameCodec.encode(SecureFrameCodec.encode(packet), client1SessionKey));
             client1Out.flush();
         }, bytes -> { });
         try (var received = take(files)) {
@@ -161,10 +167,12 @@ public final class InsecureTextIntegrationTest {
             ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
             out.flush();
             ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
+            byte[] sessionKey = RsaSessionHandshake.connect(in, out, "Client1");
             var metadata = new FileTransfer.Start(java.util.UUID.randomUUID(), "invalid.pdf", 100);
-            out.writeUTF(SecureFrameCodec.encode(new Message(MessageType.FILE_START, metadata)));
-            out.writeUTF(SecureFrameCodec.encode(new Message(MessageType.FILE_CHUNK,
-                    new FileTransfer.Chunk(metadata.fileId(), 1, new byte[] {1}))));
+            out.writeUTF(AesSessionFrameCodec.encode(SecureFrameCodec.encode(new Message(MessageType.FILE_START,
+                    "Client1", "Client2", metadata, null)), sessionKey));
+            out.writeUTF(AesSessionFrameCodec.encode(SecureFrameCodec.encode(new Message(MessageType.FILE_CHUNK,
+                    "Client1", "Client2", new FileTransfer.Chunk(metadata.fileId(), 1, new byte[] {1}), null)), sessionKey));
             out.flush();
             try { in.readUTF(); throw new AssertionError("Sunucu sırasız parçayı kabul etti"); }
             catch (java.io.EOFException expected) { }

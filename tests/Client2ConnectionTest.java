@@ -4,6 +4,8 @@ import client2.Client2Connection;
 import common.*;
 import common.FileTransferReceiver.ReceivedFile;
 import common.crypto.CryptoMode;
+import common.crypto.AesSessionFrameCodec;
+import common.crypto.RsaCryptoService;
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
@@ -32,13 +34,15 @@ public final class Client2ConnectionTest {
     }
 
     @FunctionalInterface
-    private interface PeerAction { void run(ObjectInputStream in, ObjectOutputStream out) throws Exception; }
+    private interface PeerAction { void run(ObjectInputStream in, ObjectOutputStream out, byte[] key) throws Exception; }
 
     private static final class Peer implements AutoCloseable {
         final ServerSocket server = new ServerSocket(0, 1, InetAddress.getLoopbackAddress());
         final CompletableFuture<Void> finished = new CompletableFuture<>();
         volatile Socket accepted;
-        Peer(PeerAction action) throws IOException {
+        volatile byte[] sessionKey;
+        Peer(PeerAction action) throws IOException { this(newRsa(), action); }
+        Peer(RsaCryptoService rsa, PeerAction action) throws IOException {
             Thread.startVirtualThread(() -> {
                 try (Socket socket = server.accept()) {
                     accepted = socket;
@@ -46,10 +50,24 @@ public final class Client2ConnectionTest {
                     ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
                     out.flush();
                     ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
-                    action.run(in, out); // Güncel sunucu gibi REGISTER/ACK kullanmaz.
+                    out.writeUTF(SecureFrameCodec.encode(new Message(MessageType.RSA_PUB_KEY_EXCHANGE,
+                            rsa.getPublicKeyAsBase64().getBytes(StandardCharsets.UTF_8))));
+                    out.flush();
+                    Message request = SecureFrameCodec.decode(in.readUTF());
+                    check(request.type() == MessageType.AES_KEY_EXCHANGE, "RSA ile korunmuş AES anahtarı gelmedi");
+                    sessionKey = rsa.decryptAesKey((byte[]) request.payload());
+                    check(sessionKey.length == 16, "Oturum anahtarı 128 bit değil");
+                    out.writeUTF(SecureFrameCodec.encode(new Message(MessageType.HANDSHAKE_SUCCESS, new byte[0])));
+                    out.flush();
+                    action.run(in, out, sessionKey); // ACK tamamlanınca uygulama çerçevelerini kabul et.
                     finished.complete(null);
                 } catch (Throwable e) { finished.completeExceptionally(e); }
             });
+        }
+        private static RsaCryptoService newRsa() throws IOException {
+            RsaCryptoService rsa = new RsaCryptoService();
+            try { rsa.generateKeyPair(); return rsa; }
+            catch (Exception e) { throw new IOException("Test RSA anahtarı üretilemedi", e); }
         }
         Client2Connection connect(Events events) throws IOException {
             return connect(events, CryptoMode.INSECURE, null);
@@ -73,6 +91,7 @@ public final class Client2ConnectionTest {
         fileContractValidation();
         remoteDisconnectAndReconnect();
         invalidAddress();
+        rsaSessionHandshake();
         System.out.println("PASS: UTF text, Turkish/emoji/NUL, frame limit, disconnect and reconnect.");
         System.out.println("PASS: PDF START/CHUNK/END, progress, save, binary equality and invalid/incomplete transfers.");
         System.out.println("PASS: Client-2 AES-GCM/manual CBC, Turkish/emoji/NUL, long/empty text, wrong password and tamper rejection.");
@@ -85,16 +104,16 @@ public final class Client2ConnectionTest {
             // Boş girdi ortak AES servisinde çözülebilir; kullanıcı gönderiminde reddedilir.
             String empty = SecureFrameCodec.encode(new Message(MessageType.TEXT, ""), mode, password);
             check(SecureFrameCodec.decode(empty, password).payload().equals(""), "Boş AES girdisi değişti");
-            try (Peer peer = new Peer((in, out) -> {
+            try (Peer peer = new Peer((in, out, key) -> {
                 String previous = null;
                 for (int i = 0; i < texts.length; i++) {
-                    String frame = in.readUTF();
+                    String frame = AesSessionFrameCodec.decode(in.readUTF(), key);
                     check(frame.startsWith("\u001eKRIPTO1:"), "AES yerine açık metin gönderildi");
                     check(SecureFrameCodec.decode(frame, password).payload().equals(texts[i]), "AES metni değişti");
                     check(SecureFrameCodec.validateForRelay(frame) == null, "Sunucu şifreli metni düz metin saydı");
                     if (i == 1) check(!frame.equals(previous), "Tekrarlanan metinde salt/IV değişmedi");
                     previous = frame;
-                    out.writeUTF(frame);
+                    out.writeUTF(AesSessionFrameCodec.encode(frame, key));
                     out.flush();
                 }
                 expectEof(in);
@@ -124,7 +143,7 @@ public final class Client2ConnectionTest {
             }
         }
         // İç writeUTF sınırına takılan ayrılmış önek, UI'ye IOException olarak dönmeli.
-        try (Peer peer = new Peer((in, out) -> { check(in.readUTF().equals(TEXT), "Bağlantı kullanılamadı"); expectEof(in); })) {
+        try (Peer peer = new Peer((in, out, key) -> { check(AesSessionFrameCodec.decode(in.readUTF(), key).equals(TEXT), "Bağlantı kullanılamadı"); expectEof(in); })) {
             Events events = new Events();
             try (Client2Connection connection = peer.connect(events)) {
                 try {
@@ -146,8 +165,8 @@ public final class Client2ConnectionTest {
             modified[modified.length - 1] ^= 1;
             String corrupted = prefix + Base64.getEncoder().encodeToString(modified);
             for (boolean tampered : new boolean[] {false, true}) {
-                try (Peer peer = new Peer((in, out) -> {
-                    out.writeUTF(tampered ? corrupted : valid);
+                try (Peer peer = new Peer((in, out, key) -> {
+                    out.writeUTF(AesSessionFrameCodec.encode(tampered ? corrupted : valid, key));
                     out.flush();
                     expectEof(in);
                 })) {
@@ -165,12 +184,12 @@ public final class Client2ConnectionTest {
 
     private static void textAndLimits() throws Exception {
         String escaped = "\u001eKRIPTO1:bu bir metindir";
-        try (Peer peer = new Peer((in, out) -> {
-            for (String expected : new String[] {TEXT, TEXT, "x".repeat(65535), escaped, TEXT}) {
-                String frame = in.readUTF();
+        try (Peer peer = new Peer((in, out, key) -> {
+            for (String expected : new String[] {TEXT, TEXT, "x".repeat(49000), escaped, TEXT}) {
+                String frame = AesSessionFrameCodec.decode(in.readUTF(), key);
                 check(SecureFrameCodec.decode(frame).payload().equals(expected), "TEXT değişti");
                 if (expected.equals(TEXT)) check(frame.equals(TEXT), "Client-1 uyumluluğu bozuldu");
-                out.writeUTF(frame);
+                out.writeUTF(AesSessionFrameCodec.encode(frame, key));
                 out.flush();
             }
             expectEof(in);
@@ -184,7 +203,7 @@ public final class Client2ConnectionTest {
                     connection.sendText(" \t\n");
                     throw new AssertionError("Boş mesaj kabul edildi");
                 } catch (IllegalArgumentException expected) { }
-                for (String text : new String[] {TEXT, TEXT, "x".repeat(65535), escaped}) {
+                for (String text : new String[] {TEXT, TEXT, "x".repeat(49000), escaped}) {
                     connection.sendText(text);
                     check(take(events.messages).payload().equals(text), "Gelen metin değişti");
                 }
@@ -208,15 +227,15 @@ public final class Client2ConnectionTest {
         Path source = directory.resolve("Türkçe belge.pdf");
         byte[] content = pdfBytes();
         Files.write(source, content);
-        try (Peer peer = new Peer((in, out) -> {
+        try (Peer peer = new Peer((in, out, key) -> {
             try (FileTransferReceiver receiver = new FileTransferReceiver()) {
-                Message first = SecureFrameCodec.decode(in.readUTF());
+                Message first = SecureFrameCodec.decode(AesSessionFrameCodec.decode(in.readUTF(), key));
                 check(first.type() == MessageType.FILE_START, "START eksik");
                 check("Client2".equals(first.senderId()) && "Client1".equals(first.targetId()), "Kimlik eksik");
                 receiver.start((FileTransfer.Start) first.payload());
                 int chunks = 0;
                 while (true) {
-                    Message message = SecureFrameCodec.decode(in.readUTF());
+                    Message message = SecureFrameCodec.decode(AesSessionFrameCodec.decode(in.readUTF(), key));
                     if (message.type() == MessageType.FILE_END) {
                         try (ReceivedFile file = receiver.finish((FileTransfer.End) message.payload())) {
                             Path copy = directory.resolve("sent.pdf");
@@ -230,7 +249,7 @@ public final class Client2ConnectionTest {
                 }
                 check(chunks > 1, "Çok parçalı aktarım denenmedi");
                 FileTransferSender.send(source, FileTransferSender.inspect(source), "Client1", "Client2",
-                        packet -> { out.writeUTF(SecureFrameCodec.encode(packet)); out.flush(); }, bytes -> { });
+                        packet -> { out.writeUTF(AesSessionFrameCodec.encode(SecureFrameCodec.encode(packet), key)); out.flush(); }, bytes -> { });
                 expectEof(in);
             }
         })) {
@@ -277,12 +296,12 @@ public final class Client2ConnectionTest {
         byte[] content = pdfBytes();
         for (int scenario = 0; scenario < 3; scenario++) {
             final int mode = scenario;
-            try (Peer peer = new Peer((in, out) -> {
+            try (Peer peer = new Peer((in, out, key) -> {
                 UUID id = UUID.randomUUID();
-                send(out, MessageType.FILE_START, new FileTransfer.Start(id, "incomplete.pdf", content.length));
-                send(out, MessageType.FILE_CHUNK, new FileTransfer.Chunk(id, mode == 2 ? 1 : 0,
+                send(out, key, MessageType.FILE_START, new FileTransfer.Start(id, "incomplete.pdf", content.length));
+                send(out, key, MessageType.FILE_CHUNK, new FileTransfer.Chunk(id, mode == 2 ? 1 : 0,
                         Arrays.copyOf(content, FileTransfer.CHUNK_SIZE)));
-                if (mode == 1) send(out, MessageType.FILE_END, new FileTransfer.End(id, 1));
+                if (mode == 1) send(out, key, MessageType.FILE_END, new FileTransfer.End(id, 1));
                 if (mode != 0) expectEof(in);
             })) {
                 Events events = new Events();
@@ -329,7 +348,7 @@ public final class Client2ConnectionTest {
 
     private static void remoteDisconnectAndReconnect() throws Exception {
         for (int attempt = 0; attempt < 2; attempt++) {
-            try (Peer peer = new Peer((in, out) -> check(in.readUTF().equals(TEXT), "Yeniden gönderim başarısız"))) {
+            try (Peer peer = new Peer((in, out, key) -> check(AesSessionFrameCodec.decode(in.readUTF(), key).equals(TEXT), "Yeniden gönderim başarısız"))) {
                 Events events = new Events();
                 try (Client2Connection connection = peer.connect(events)) {
                     connection.startReceiving();
@@ -353,6 +372,56 @@ public final class Client2ConnectionTest {
         } catch (IllegalArgumentException expected) { }
     }
 
+    private static void rsaSessionHandshake() throws Exception {
+        RsaCryptoService serverRsa = Peer.newRsa();
+        byte[] firstKey;
+        try (Peer peer = new Peer(serverRsa, (in, out, key) -> expectEof(in));
+             Client2Connection connection = peer.connect(new Events())) {
+            firstKey = peer.sessionKey.clone();
+        }
+        byte[] secondKey;
+        try (Peer peer = new Peer(serverRsa, (in, out, key) -> expectEof(in));
+             Client2Connection connection = peer.connect(new Events())) {
+            secondKey = peer.sessionKey.clone();
+        }
+        check(firstKey.length == 16 && secondKey.length == 16, "AES session key 128 bit değil");
+        check(!Arrays.equals(firstKey, secondKey), "İki istemci aynı AES session key'i aldı");
+
+        // ACK gecikince connect bekler; anahtar paketinden önce uygulama verisi görünmemeli.
+        try (ServerSocket listener = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
+            RsaCryptoService rsa = Peer.newRsa();
+            CompletableFuture<String> receivedData = new CompletableFuture<>();
+            Thread.startVirtualThread(() -> {
+                try (Socket socket = listener.accept()) {
+                    socket.setSoTimeout(5000);
+                    ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream()); out.flush();
+                    ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
+                    out.writeUTF(SecureFrameCodec.encode(new Message(MessageType.RSA_PUB_KEY_EXCHANGE,
+                            rsa.getPublicKeyAsBase64().getBytes(StandardCharsets.UTF_8)))); out.flush();
+                    Message request = SecureFrameCodec.decode(in.readUTF());
+                    check(request.type() == MessageType.AES_KEY_EXCHANGE, "AES anahtarı bekleniyordu");
+                    byte[] key = rsa.decryptAesKey((byte[]) request.payload());
+                    Thread.sleep(250);
+                    check(in.available() == 0 && socket.getInputStream().available() == 0,
+                            "ACK öncesinde uygulama verisi gönderildi");
+                    out.writeUTF(SecureFrameCodec.encode(new Message(MessageType.HANDSHAKE_SUCCESS, new byte[0])));
+                    out.flush();
+                    socket.setSoTimeout(5000);
+                    receivedData.complete(AesSessionFrameCodec.decode(in.readUTF(), key));
+                    expectEof(in);
+                } catch (Throwable e) { receivedData.completeExceptionally(e); }
+            });
+
+            Client2Connection connection = Client2Connection.connect("127.0.0.1", listener.getLocalPort(), new Events());
+            try (connection) {
+                connection.sendText("ACK sonrası güvenli veri");
+                Message received = SecureFrameCodec.decode(receivedData.get(5, TimeUnit.SECONDS));
+                check("ACK sonrası güvenli veri".equals(received.payload()), "ACK sonrası veri çözülemedi");
+            }
+        }
+        System.out.println("PASS: RSA-wrapped, unique 128-bit AES sessions; no application frame before ACK.");
+    }
+
     private static byte[] pdfBytes() {
         byte[] content = new byte[FileTransfer.CHUNK_SIZE * 2 + 37];
         new Random(445876).nextBytes(content);
@@ -360,8 +429,9 @@ public final class Client2ConnectionTest {
         System.arraycopy(header, 0, content, 0, header.length);
         return content; // İkili aktarım fixture'ı; PDF ayrıştırıcısı testi değildir.
     }
-    private static void send(ObjectOutputStream out, MessageType type, Object payload) throws IOException {
-        out.writeUTF(SecureFrameCodec.encode(new Message(type, "Client1", "Client2", payload, null)));
+    private static void send(ObjectOutputStream out, byte[] key, MessageType type, Object payload) throws IOException {
+        String frame = SecureFrameCodec.encode(new Message(type, "Client1", "Client2", payload, null));
+        out.writeUTF(AesSessionFrameCodec.encode(frame, key));
         out.flush();
     }
     private static void expectEof(ObjectInputStream in) throws Exception {

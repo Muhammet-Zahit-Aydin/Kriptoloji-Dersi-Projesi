@@ -7,7 +7,8 @@ import common.Message;
 import common.MessageType;
 import common.SecureFrameCodec;
 import common.crypto.CryptoMode;
-import common.crypto.RsaCryptoService;
+import common.crypto.AesSessionFrameCodec;
+import common.crypto.RsaSessionHandshake;
 
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
@@ -23,7 +24,6 @@ import java.nio.file.Path;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
-import java.security.PublicKey;
 
 /** Client-2 UTF stream and message/file transport. */
 public final class Client2Connection implements AutoCloseable {
@@ -35,6 +35,7 @@ public final class Client2Connection implements AutoCloseable {
     private final Listener listener;
     private final CryptoMode cryptoMode;
     private final String password;
+    private final byte[] sessionKey;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AtomicBoolean receiving = new AtomicBoolean();
     private final AtomicBoolean fileSending = new AtomicBoolean();
@@ -49,8 +50,8 @@ public final class Client2Connection implements AutoCloseable {
         }
     }
 
-    private Client2Connection(Socket socket,ObjectOutputStream out,ObjectInputStream in,Listener listener,CryptoMode mode,String password) {
-        this.socket=socket; this.out=out; this.in=in; this.listener=listener; this.cryptoMode=mode; this.password=password;
+    private Client2Connection(Socket socket,ObjectOutputStream out,ObjectInputStream in,Listener listener,CryptoMode mode,String password,byte[] sessionKey) {
+        this.socket=socket; this.out=out; this.in=in; this.listener=listener; this.cryptoMode=mode; this.password=password; this.sessionKey=sessionKey.clone();
     }
 
     /** Existing callers keep the insecure compatibility mode. */
@@ -68,40 +69,10 @@ public final class Client2Connection implements AutoCloseable {
         try {
             socket.connect(new InetSocketAddress(host.trim(),port),TIMEOUT_MS); socket.setSoTimeout(TIMEOUT_MS);
             ObjectOutputStream out=new ObjectOutputStream(socket.getOutputStream()); out.flush();
-            ObjectInputStream in=new ObjectInputStream(socket.getInputStream()); socket.setSoTimeout(0);
-            
-            // --- RSA HANDSHAKE BAŞLANGICI ---
-            try {
-                String pubKeyFrame = in.readUTF();
-                Message pubKeyMsg = SecureFrameCodec.decode(pubKeyFrame, "");
-
-                if (pubKeyMsg != null && pubKeyMsg.type() == MessageType.RSA_PUB_KEY_EXCHANGE) {
-                    String base64PubKey = new String((byte[]) pubKeyMsg.payload());
-                    PublicKey serverPubKey = RsaCryptoService.getPublicKeyFromBase64(base64PubKey);
-
-                    // TODO: Gerçek AES anahtarını kendi kripto servisinden üretin
-                    byte[] myAesKey = new byte[16]; 
-                    byte[] encryptedAesKey = RsaCryptoService.encryptAesKey(myAesKey, serverPubKey);
-
-                    Message aesKeyMsg = new Message(MessageType.AES_KEY_EXCHANGE, CLIENT_ID, "Server", encryptedAesKey, null);
-                    out.writeUTF(SecureFrameCodec.encode(aesKeyMsg, CryptoMode.INSECURE, ""));
-                    out.flush();
-
-                    String confirmFrame = in.readUTF();
-                    Message confirmMsg = SecureFrameCodec.decode(confirmFrame, "");
-                    
-                    if (confirmMsg == null || confirmMsg.type() != MessageType.HANDSHAKE_SUCCESS) {
-                        throw new IOException("Bağlantı güvenli değil: Sunucu handshake'i reddetti.");
-                    }
-                } else {
-                    throw new IOException("Beklenmeyen paket: Sunucu RSA Public Key göndermedi.");
-                }
-            } catch (Exception e) {
-                throw new IOException("RSA Handshake sırasında hata oluştu: " + e.getMessage(), e);
-            }
-            // --- RSA HANDSHAKE BİTİŞİ ---
-
-            return new Client2Connection(socket,out,in,listener,selected,password);
+            ObjectInputStream in=new ObjectInputStream(socket.getInputStream());
+            byte[] sessionKey = RsaSessionHandshake.connect(in, out, CLIENT_ID);
+            socket.setSoTimeout(0);
+            return new Client2Connection(socket,out,in,listener,selected,password,sessionKey);
         } catch(IOException|RuntimeException e) { closeSocket(socket); throw e; }
     }
 
@@ -111,7 +82,9 @@ public final class Client2Connection implements AutoCloseable {
         if(text==null||text.isBlank()) throw new IllegalArgumentException("Boş mesaj gönderilemez.");
         String frame;
         try {
-            frame = SecureFrameCodec.encode(new Message(MessageType.TEXT,CLIENT_ID,"Client1",text,null),cryptoMode,password);
+            frame = AesSessionFrameCodec.encode(
+                    SecureFrameCodec.encode(new Message(MessageType.TEXT,CLIENT_ID,"Client1",text,null),cryptoMode,password),
+                    sessionKey);
         } catch (IllegalArgumentException e) {
             if (e.getCause() instanceof UTFDataFormatException) throw frameLimitError();
             throw new IOException("Metin kodlanamadı: " + e.getMessage(), e);
@@ -125,7 +98,10 @@ public final class Client2Connection implements AutoCloseable {
         AtomicBoolean started=new AtomicBoolean();
         try {
             FileTransfer.Start metadata=FileTransferSender.inspect(path);
-            FileTransferSender.send(path,metadata,CLIENT_ID,"Client1",message->{ started.set(true); writeFrame(SecureFrameCodec.encode(message)); },bytes->progress.accept(metadata,bytes));
+            FileTransferSender.send(path,metadata,CLIENT_ID,"Client1",message->{
+                started.set(true);
+                writeFrame(AesSessionFrameCodec.encode(SecureFrameCodec.encode(message),sessionKey));
+            },bytes->progress.accept(metadata,bytes));
         } catch(IOException e) { if(started.get()) disconnect("PDF gönderimi yarıda kesildi: "+e.getMessage()); throw e; }
         finally { fileSending.set(false); }
     }
@@ -143,7 +119,11 @@ public final class Client2Connection implements AutoCloseable {
     }
 
     private void receiveLoop() {
-        try { while(!closed.get()) { Message message=SecureFrameCodec.decode(in.readUTF(),password); if(message.type()==MessageType.TEXT) listener.onMessage(message); else receiveFile(message); } }
+        try { while(!closed.get()) {
+            String frame=AesSessionFrameCodec.decode(in.readUTF(),sessionKey);
+            Message message=SecureFrameCodec.decode(frame,password);
+            if(message.type()==MessageType.TEXT) listener.onMessage(message); else receiveFile(message);
+        } }
         catch(EOFException|SocketException e) { disconnect("Sunucu bağlantıyı kapattı."); }
         catch(IOException e) { disconnect("Mesaj alınamadı: "+e.getMessage()); }
         finally { disconnect("Bağlantı kapatıldı."); }
