@@ -6,19 +6,20 @@ import common.Message;
 import common.MessageType;
 import common.SecureFrameCodec;
 import common.crypto.AesSessionFrameCodec;
-import common.crypto.RsaCryptoService;
+import common.crypto.DiffieHellmanUtils;
 
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.NoSuchAlgorithmException;
+import java.security.KeyPair;
+import java.security.PublicKey;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import javax.crypto.spec.SecretKeySpec;
 
 /** AES-GCM session relay shared by the two desktop clients. */
 public final class Server {
@@ -50,25 +51,18 @@ public final class Server {
     }
 
     public static void main(String[] args) {
-        RsaCryptoService rsaService = new RsaCryptoService();
-        try {
-            rsaService.generateKeyPair();
-        } catch (NoSuchAlgorithmException e) {
-            throw new RuntimeException("RSA KeyPair üretilemedi", e);
-        }
-
         System.out.println("[DİNLENİYOR] Sunucu " + PORT + " portunda başlatıldı...");
         try (ServerSocket listener = new ServerSocket(PORT)) {
             while (true) {
                 Socket socket = listener.accept();
-                Thread.startVirtualThread(() -> handleClient(socket, rsaService));
+                Thread.startVirtualThread(() -> handleClient(socket));
             }
         } catch (IOException e) {
             System.err.println("Sunucu başlatılamadı: " + e.getMessage());
         }
     }
 
-    private static void handleClient(Socket socket, RsaCryptoService rsaService) {
+    private static void handleClient(Socket socket) {
         Session session = null;
         try (socket;
              FileTransferReceiver files = new FileTransferReceiver();
@@ -76,7 +70,7 @@ public final class Server {
             out.flush();
             ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
 
-            Session pending = completeHandshake(socket, out, in, rsaService);
+            Session pending = completeHandshake(socket, out, in);
             if (pending == null) return;
             socket.setSoTimeout(0);
             clients.add(pending); // Oturum yalnızca ACK gönderildikten sonra görünür olur.
@@ -98,33 +92,42 @@ public final class Server {
     }
 
     private static Session completeHandshake(Socket socket, ObjectOutputStream out,
-                                             ObjectInputStream in, RsaCryptoService rsaService) throws IOException {
+                                             ObjectInputStream in) throws IOException {
         try {
             socket.setSoTimeout(5000);
-            Message publicKey = new Message(MessageType.RSA_PUB_KEY_EXCHANGE,
-                    rsaService.getPublicKeyAsBase64().getBytes(StandardCharsets.UTF_8));
-            out.writeUTF(SecureFrameCodec.encode(publicKey));
+            
+            // 1. Sunucu kendi DH anahtar çiftini üretir
+            KeyPair serverKeyPair = DiffieHellmanUtils.generateDHKeyPair();
+            
+            // 2. Sunucunun DH Public Key'ini istemciye gönder
+            Message publicKeyMessage = new Message(MessageType.DH_PUB_KEY_EXCHANGE,
+                    serverKeyPair.getPublic().getEncoded());
+            out.writeUTF(SecureFrameCodec.encode(publicKeyMessage));
             out.flush();
 
+            // 3. İstemciden gelen DH Public Key'i ve İstemci ID'sini bekle
             Message request = SecureFrameCodec.decode(in.readUTF());
-            if (request.type() != MessageType.AES_KEY_EXCHANGE
-                    || !(request.payload() instanceof byte[] encryptedKey)
+            if (request.type() != MessageType.DH_PUB_KEY_EXCHANGE
+                    || !(request.payload() instanceof byte[] clientPubKeyBytes)
                     || request.senderId() == null || request.senderId().isBlank()) {
                 sendHandshakeResult(out, false);
                 return null;
             }
 
-            byte[] key = rsaService.decryptAesKey(encryptedKey);
-            if (key.length != 16) {
-                sendHandshakeResult(out, false);
-                return null;
-            }
-            sendHandshakeResult(out, true); // ACK gelince istemci güvenli kanala geçebilir.
-            return new Session(socket, out, request.senderId(), key);
+            // 4. İstemcinin Public Key'ini dönüştür, Shared Secret hesapla ve AES anahtarını türet
+            PublicKey clientPubKey = DiffieHellmanUtils.getPublicKeyFromBytes(clientPubKeyBytes);
+            byte[] sharedSecret = DiffieHellmanUtils.computeSharedSecret(serverKeyPair.getPrivate(), clientPubKey);
+            SecretKeySpec aesSessionKey = DiffieHellmanUtils.deriveAes128Key(sharedSecret);
+            byte[] keyBytes = aesSessionKey.getEncoded();
+
+            // 5. Başarılı olduğunu istemciye bildir
+            sendHandshakeResult(out, true); 
+            return new Session(socket, out, request.senderId(), keyBytes);
+            
         } catch (Exception e) {
             try { sendHandshakeResult(out, false); } catch (IOException ignored) { }
             if (e instanceof IOException io) throw io;
-            throw new IOException("RSA anahtar değişimi doğrulanamadı.", e);
+            throw new IOException("Diffie-Hellman anahtar değişimi doğrulanamadı.", e);
         }
     }
 
@@ -160,4 +163,3 @@ public final class Server {
         }
     }
 }
-

@@ -8,7 +8,7 @@ import common.MessageType;
 import common.SecureFrameCodec;
 import common.crypto.CryptoMode;
 import common.crypto.AesSessionFrameCodec;
-import common.crypto.RsaSessionHandshake;
+import common.crypto.DiffieHellmanUtils;
 
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
@@ -21,6 +21,8 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketException;
 import java.nio.file.Path;
+import java.security.KeyPair;
+import java.security.PublicKey;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
@@ -70,7 +72,41 @@ public final class Client2Connection implements AutoCloseable {
             socket.connect(new InetSocketAddress(host.trim(),port),TIMEOUT_MS); socket.setSoTimeout(TIMEOUT_MS);
             ObjectOutputStream out=new ObjectOutputStream(socket.getOutputStream()); out.flush();
             ObjectInputStream in=new ObjectInputStream(socket.getInputStream());
-            byte[] sessionKey = RsaSessionHandshake.connect(in, out, CLIENT_ID);
+            
+            // --- DIFFIE-HELLMAN EL SIKIŞMASI (HANDSHAKE) ---
+            byte[] sessionKey;
+            try {
+                // 1. Sunucunun gönderdiği DH Public Key'i al
+                Message serverMsg = SecureFrameCodec.decode(in.readUTF());
+                if (serverMsg.type() != MessageType.DH_PUB_KEY_EXCHANGE) {
+                    throw new IOException("Sunucudan DH anahtarı beklenirken başka paket geldi.");
+                }
+                byte[] serverPubKeyBytes = (byte[]) serverMsg.payload();
+
+                // 2. Kendi DH anahtar çiftimizi üret
+                KeyPair clientKeyPair = DiffieHellmanUtils.generateDHKeyPair();
+
+                // 3. Kendi DH Public Key'imizi sunucuya "Client2" kimliğiyle gönder
+                Message clientMsg = new Message(MessageType.DH_PUB_KEY_EXCHANGE, CLIENT_ID, null, clientKeyPair.getPublic().getEncoded(), null);
+                out.writeUTF(SecureFrameCodec.encode(clientMsg));
+                out.flush();
+
+                // 4. Ortak sırrı ve AES-128 Session Key'i türet
+                PublicKey serverPubKey = DiffieHellmanUtils.getPublicKeyFromBytes(serverPubKeyBytes);
+                byte[] sharedSecret = DiffieHellmanUtils.computeSharedSecret(clientKeyPair.getPrivate(), serverPubKey);
+                sessionKey = DiffieHellmanUtils.deriveAes128Key(sharedSecret).getEncoded();
+
+                // 5. Sunucudan gelecek HANDSHAKE_SUCCESS onayını (ACK) bekle
+                Message ackMsg = SecureFrameCodec.decode(in.readUTF());
+                if (ackMsg.type() != MessageType.HANDSHAKE_SUCCESS) {
+                    throw new IOException("Sunucu DH el sıkışmasını reddetti.");
+                }
+            } catch (Exception e) {
+                if (e instanceof IOException) throw (IOException) e;
+                throw new IOException("Diffie-Hellman el sıkışması sırasında hata oluştu: " + e.getMessage(), e);
+            }
+            // ------------------------------------------------
+
             socket.setSoTimeout(0);
             return new Client2Connection(socket,out,in,listener,selected,password,sessionKey);
         } catch(IOException|RuntimeException e) { closeSocket(socket); throw e; }
