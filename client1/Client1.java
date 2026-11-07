@@ -8,7 +8,8 @@ import common.MessageType;
 import common.SecureFrameCodec;
 import common.crypto.CryptoMode;
 import common.crypto.AesSessionFrameCodec;
-import common.crypto.DiffieHellmanUtils;
+import common.crypto.KeyExchangeMethod;
+import common.crypto.SessionHandshake;
 
 import javax.swing.*;
 import javax.swing.filechooser.FileNameExtensionFilter;
@@ -24,12 +25,11 @@ import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.net.Socket;
 import java.nio.file.Path;
-import java.security.KeyPair;
-import java.security.PublicKey;
 
 public class Client1 extends JFrame {
     private final JTextField txtIp = new JTextField("127.0.0.1", 10);
     private final JTextField txtPort = new JTextField("5000", 5);
+    private final JComboBox<KeyExchangeMethod> cmbKeyExchange = new JComboBox<>(KeyExchangeMethod.values());
     private final JComboBox<CryptoMode> cmbCryptoMode = new JComboBox<>(CryptoMode.values());
     private final JPasswordField txtPassphrase = new JPasswordField(12);
     private final JButton btnConnect = new JButton("Bağlan");
@@ -70,7 +70,12 @@ public class Client1 extends JFrame {
         JPanel securityRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 3));
         securityRow.add(new JLabel("Şifreleme:")); securityRow.add(cmbCryptoMode);
         securityRow.add(new JLabel("Ortak parola:")); securityRow.add(txtPassphrase);
-        top.add(connectionRow); top.add(securityRow);
+        JPanel keyExchangeRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 3));
+        keyExchangeRow.add(new JLabel("Anahtar değişimi:"));
+        keyExchangeRow.add(cmbKeyExchange);
+        top.add(connectionRow);
+        top.add(keyExchangeRow);
+        top.add(securityRow);
         add(top, BorderLayout.NORTH);
 
         txtMessages.setEditable(false); txtMessages.setLineWrap(true); txtMessages.setWrapStyleWord(true);
@@ -98,6 +103,7 @@ public class Client1 extends JFrame {
         try { port=Integer.parseInt(txtPort.getText().trim()); if(host.isBlank()||port<1||port>65535) throw new IllegalArgumentException(); }
         catch(IllegalArgumentException e) { JOptionPane.showMessageDialog(this,"Sunucu adresi ve 1-65535 arasında port girin.","Bağlantı bilgisi",JOptionPane.ERROR_MESSAGE); return; }
         CryptoMode mode=(CryptoMode)cmbCryptoMode.getSelectedItem();
+        KeyExchangeMethod method = (KeyExchangeMethod) cmbKeyExchange.getSelectedItem();
         String password=new String(txtPassphrase.getPassword());
         if(mode!=CryptoMode.INSECURE&&password.isBlank()) { JOptionPane.showMessageDialog(this,"Şifreli modda Client-2 ile aynı parolayı kullanın.","Parola gerekli",JOptionPane.ERROR_MESSAGE); return; }
         connecting=true; lblStatus.setText("Bağlanıyor..."); updateControls();
@@ -110,43 +116,18 @@ public class Client1 extends JFrame {
                 ObjectOutputStream openedOut=new ObjectOutputStream(pendingSocket.getOutputStream()); openedOut.flush();
                 ObjectInputStream openedIn=new ObjectInputStream(pendingSocket.getInputStream());
 
-                // --- DIFFIE-HELLMAN EL SIKIŞMASI (HANDSHAKE) ---
-                
-                // 1. Sunucunun gönderdiği DH Public Key'i al
-                Message serverMsg = SecureFrameCodec.decode(openedIn.readUTF());
-                if (serverMsg.type() != MessageType.DH_PUB_KEY_EXCHANGE) {
-                    throw new IOException("Sunucudan DH anahtarı beklenirken başka paket geldi.");
-                }
-                byte[] serverPubKeyBytes = (byte[]) serverMsg.payload();
-
-                // 2. Kendi DH anahtar çiftimizi üret
-                KeyPair clientKeyPair = DiffieHellmanUtils.generateDHKeyPair();
-
-                // 3. Kendi DH Public Key'imizi sunucuya "Client1" kimliğiyle gönder
-                Message clientMsg = new Message(MessageType.DH_PUB_KEY_EXCHANGE, "Client1", null, clientKeyPair.getPublic().getEncoded(), null);
-                openedOut.writeUTF(SecureFrameCodec.encode(clientMsg));
-                openedOut.flush();
-
-                // 4. Ortak sırrı ve AES-128 Session Key'i türet
-                PublicKey serverPubKey = DiffieHellmanUtils.getPublicKeyFromBytes(serverPubKeyBytes);
-                byte[] sharedSecret = DiffieHellmanUtils.computeSharedSecret(clientKeyPair.getPrivate(), serverPubKey);
-                byte[] openedSessionKey = DiffieHellmanUtils.deriveAes128Key(sharedSecret).getEncoded();
-
-                // 5. Sunucudan gelecek HANDSHAKE_SUCCESS onayını (ACK) bekle
-                Message ackMsg = SecureFrameCodec.decode(openedIn.readUTF());
-                if (ackMsg.type() != MessageType.HANDSHAKE_SUCCESS) {
-                    throw new IOException("Sunucu DH el sıkışmasını reddetti.");
-                }
-                // ------------------------------------------------
+                // İki istemci aynı ortak kodla yöntem seçer ve ACK'yi bekler.
+                byte[] openedSessionKey = SessionHandshake.connect(openedIn, openedOut, "Client1", method);
 
                 pendingSocket.setSoTimeout(0);
-                SwingUtilities.invokeLater(() -> append("[Sistem] Diffie-Hellman el sıkışması ACK ile tamamlandı."));
+                SwingUtilities.invokeLater(() -> append("[Sistem] " + method + " el sıkışması ACK ile tamamlandı."));
 
                 Socket readySocket = pendingSocket;
                 SwingUtilities.invokeLater(() -> {
                     if(closing) { connecting=false; try { readySocket.close(); } catch(IOException ignored) { } return; }
                     connecting=false; socket=readySocket; out=openedOut; in=openedIn; sessionKey=openedSessionKey; activeMode=mode; activePassword=password; connected=true;
-                    lblStatus.setText("Bağlı — "+mode); append("[Sistem] Sunucuya tam olarak bağlandı: "+host+":"+port);
+                    lblStatus.setText("Bağlı — " + method + " | " + mode);
+                    append("[Sistem] Sunucuya tam olarak bağlandı: " + host + ":" + port);
                     updateControls(); Thread.startVirtualThread(this::receiveMessages);
                 });
                 pendingSocket = null; // Bağlantı artık alanlar tarafından yönetilir.
@@ -245,7 +226,11 @@ public class Client1 extends JFrame {
 
     private void updateControls() {
         btnConnect.setEnabled(!connected&&!connecting); btnDisconnect.setEnabled(connected);
-        txtIp.setEditable(!connected&&!connecting); txtPort.setEditable(!connected&&!connecting); cmbCryptoMode.setEnabled(!connected&&!connecting); txtPassphrase.setEditable(!connected&&!connecting);
+        txtIp.setEditable(!connected && !connecting);
+        txtPort.setEditable(!connected && !connecting);
+        cmbKeyExchange.setEnabled(!connected && !connecting);
+        cmbCryptoMode.setEnabled(!connected && !connecting);
+        txtPassphrase.setEditable(!connected && !connecting);
         btnSend.setEnabled(connected); txtMessageInput.setEnabled(connected); btnFileSelect.setEnabled(connected&&!sendingFile);
         btnSavePdf.setEnabled(receivedFile!=null);
     }

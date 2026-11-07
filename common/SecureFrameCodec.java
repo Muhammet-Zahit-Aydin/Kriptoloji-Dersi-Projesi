@@ -31,6 +31,13 @@ public final class SecureFrameCodec {
     public static String encode(Message message, CryptoMode mode, String password) {
         if (message == null || message.type() == null) throw new IllegalArgumentException("Mesaj gerekli.");
         CryptoMode selected = mode == null ? CryptoMode.INSECURE : mode;
+        // Yöntem seçimi ve DH açık anahtarı, uygulama verisinden önce taşınır.
+        if (message.type() == MessageType.DH_PUB_KEY_EXCHANGE
+                || message.type() == MessageType.KEY_EXCHANGE_INIT) {
+            byte kind = message.type() == MessageType.DH_PUB_KEY_EXCHANGE ? (byte) 11 : (byte) 12;
+            return encodeBinary(kind,
+                    message, out -> writeByteArray(out, (byte[]) message.payload()));
+        }
         if (message.type() == MessageType.RSA_PUB_KEY_EXCHANGE || message.type() == MessageType.AES_KEY_EXCHANGE)
             return encodeBinary(message.type() == MessageType.RSA_PUB_KEY_EXCHANGE ? (byte)7 : (byte)8,
                     message, out -> writeByteArray(out, (byte[]) message.payload()));
@@ -107,6 +114,8 @@ public final class SecureFrameCodec {
                     case 8 -> new Message(MessageType.AES_KEY_EXCHANGE,sender,target,readByteArray(in),null);
                     case 9 -> new Message(MessageType.HANDSHAKE_SUCCESS,sender,target,new byte[0],null);
                     case 10 -> new Message(MessageType.HANDSHAKE_FAILED,sender,target,new byte[0],null);
+                    case 11 -> new Message(MessageType.DH_PUB_KEY_EXCHANGE,sender,target,readByteArray(in),null);
+                    case 12 -> new Message(MessageType.KEY_EXCHANGE_INIT,sender,target,readByteArray(in),null);
                     default -> throw new IOException("Bilinmeyen çerçeve türü.");
                 };
                 if (in.available()!=0) throw new IOException("Çerçevede fazladan veri var.");

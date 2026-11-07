@@ -5,6 +5,7 @@ import common.FileTransfer;
 import common.FileTransferReceiver.ReceivedFile;
 import common.FileTransferSender;
 import common.crypto.CryptoMode;
+import common.crypto.KeyExchangeMethod;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Dimension;
@@ -34,18 +35,22 @@ import javax.swing.JTextField;
 import javax.swing.SwingUtilities;
 import javax.swing.filechooser.FileNameExtensionFilter;
 
+/** Client-2 arayüzü; ağ ve dosya işlemleri arka planda, ekran güncellemeleri EDT'dedir. */
 public class Client2 extends JFrame {
     @Serial
     private static final long serialVersionUID = 1L;
     private static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("HH:mm:ss");
 
+    // Bağlantı kurulurken yöntem seçilir; açık oturumun yöntemi sonradan değişmez.
     private final JTextField txtIp = new JTextField("127.0.0.1", 12);
     private final JTextField txtPort = new JTextField("5000", 5);
+    private final JComboBox<KeyExchangeMethod> cmbKeyExchange = new JComboBox<>(KeyExchangeMethod.values());
     private final JComboBox<CryptoMode> cmbCryptoMode = new JComboBox<>(CryptoMode.values());
     private final javax.swing.JPasswordField txtPassphrase = new javax.swing.JPasswordField(12);
     private final JButton btnConnect = new JButton("Bağlan");
     private final JButton btnDisconnect = new JButton("Bağlantıyı Kes");
     private final JLabel lblStatus = new JLabel();
+    // Metin alanları ve PDF kontrolleri mevcut gönderme/alma akışını gösterir.
     private final JTextArea txtIncoming = messageArea();
     private final JTextArea txtOutgoing = messageArea();
     private final JTextField txtMessage = new JTextField();
@@ -85,12 +90,19 @@ public class Client2 extends JFrame {
         JPanel connectionPanel = new JPanel(new BorderLayout());
         JPanel controls = new JPanel(new BorderLayout(0, 4));
         JPanel networkControls = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
-        networkControls.add(new JLabel("Sunucu IP:")); networkControls.add(txtIp);
-        networkControls.add(new JLabel("Port:")); networkControls.add(txtPort);
-        networkControls.add(btnConnect); networkControls.add(btnDisconnect);
+        networkControls.add(new JLabel("Sunucu IP:"));
+        networkControls.add(txtIp);
+        networkControls.add(new JLabel("Port:"));
+        networkControls.add(txtPort);
+        networkControls.add(new JLabel("Anahtar değişimi:"));
+        networkControls.add(cmbKeyExchange);
+        networkControls.add(btnConnect);
+        networkControls.add(btnDisconnect);
         JPanel securityControls = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
-        securityControls.add(new JLabel("Şifreleme:")); securityControls.add(cmbCryptoMode);
-        securityControls.add(new JLabel("Ortak parola:")); securityControls.add(txtPassphrase);
+        securityControls.add(new JLabel("Şifreleme:"));
+        securityControls.add(cmbCryptoMode);
+        securityControls.add(new JLabel("Ortak parola:"));
+        securityControls.add(txtPassphrase);
         controls.add(networkControls, BorderLayout.NORTH);
         JPanel securityPanel = new JPanel(new BorderLayout(0, 4));
         securityPanel.add(securityControls, BorderLayout.NORTH);
@@ -134,9 +146,17 @@ public class Client2 extends JFrame {
         btnSendPdf.addActionListener(e -> sendPdf());
         btnSavePdf.addActionListener(e -> savePdf());
         txtMessage.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
-            public void insertUpdate(javax.swing.event.DocumentEvent e) { updateControls(); }
-            public void removeUpdate(javax.swing.event.DocumentEvent e) { updateControls(); }
-            public void changedUpdate(javax.swing.event.DocumentEvent e) { updateControls(); }
+            public void insertUpdate(javax.swing.event.DocumentEvent e) {
+                updateControls();
+            }
+
+            public void removeUpdate(javax.swing.event.DocumentEvent e) {
+                updateControls();
+            }
+
+            public void changedUpdate(javax.swing.event.DocumentEvent e) {
+                updateControls();
+            }
         });
         addWindowListener(new WindowAdapter() {
             @Override
@@ -144,7 +164,9 @@ public class Client2 extends JFrame {
                 windowClosed = true;
                 disconnectFromServer();
                 ArrayList<ReceivedFile> pending = new ArrayList<>();
-                for (int i = 0; i < receivedFiles.getSize(); i++) pending.add(receivedFiles.getElementAt(i));
+                for (int i = 0; i < receivedFiles.getSize(); i++) {
+                    pending.add(receivedFiles.getElementAt(i));
+                }
                 // Kaydetme sürüyorsa pencerenin kapanmasını dosya kopyasıyla bekletme.
                 Thread.ofPlatform().start(() -> pending.forEach(Client2::discard));
             }
@@ -167,7 +189,9 @@ public class Client2 extends JFrame {
         panel.add(label, BorderLayout.NORTH);
         panel.add(progress, BorderLayout.CENTER);
         JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 5, 0));
-        for (JButton button : buttons) actions.add(button);
+        for (JButton button : buttons) {
+            actions.add(button);
+        }
         panel.add(actions, BorderLayout.EAST);
         return panel;
     }
@@ -187,6 +211,7 @@ public class Client2 extends JFrame {
         return panel;
     }
 
+    /** Bağlantı ve el sıkışma tamamlanınca arayüz veri gönderimine açılır. */
     private void connectToServer() {
         if (connecting || connection != null || windowClosed) {
             return;
@@ -206,6 +231,7 @@ public class Client2 extends JFrame {
         }
 
         CryptoMode mode = (CryptoMode) cmbCryptoMode.getSelectedItem();
+        KeyExchangeMethod method = (KeyExchangeMethod) cmbKeyExchange.getSelectedItem();
         String password = new String(txtPassphrase.getPassword());
         if (mode != CryptoMode.INSECURE && password.isBlank()) {
             JOptionPane.showMessageDialog(this, "Şifreli mod için Client-1 ile aynı parolayı girin.", "Parola gerekli", JOptionPane.ERROR_MESSAGE);
@@ -218,7 +244,7 @@ public class Client2 extends JFrame {
         SessionListener listener = new SessionListener();
         Thread.startVirtualThread(() -> {
             try {
-                Client2Connection opened = Client2Connection.connect(host, port, listener, mode, password);
+                Client2Connection opened = Client2Connection.connect(host, port, listener, mode, password, method);
                 SwingUtilities.invokeLater(() -> {
                     connecting = false;
                     if (windowClosed) {
@@ -227,8 +253,8 @@ public class Client2 extends JFrame {
                     }
                     connection = opened;
                     listener.session = opened;
-                    setStatus("Bağlı - " + host + ":" + port + " | " + mode, true);
-                    append(txtIncoming, "[Sunucu] Mod: " + mode);
+                    setStatus("Bağlı - " + host + ":" + port + " | " + method, true);
+                    append(txtIncoming, "[Sunucu] " + method + " oturumu ACK ile kuruldu. Mod: " + mode);
                     updateControls();
                     opened.startReceiving();
                     txtMessage.requestFocusInWindow();
@@ -259,6 +285,7 @@ public class Client2 extends JFrame {
         updateControls();
     }
 
+    /** Gönderim boyunca düğmeler kilitlenir; sonuç EDT üzerinden gösterilir. */
     private void sendMessage() {
         if (connection == null || sending || sendingFile || txtMessage.getText().isBlank()) {
             return;
@@ -292,11 +319,14 @@ public class Client2 extends JFrame {
         });
     }
 
+    /** Dosya başlığı ve boyutu, arayüzü bekletmeden ortak göndericiyle incelenir. */
     private void selectPdf() {
         JFileChooser chooser = new JFileChooser();
         chooser.setFileFilter(new FileNameExtensionFilter("PDF dosyaları (*.pdf)", "pdf"));
         chooser.setAcceptAllFileFilterUsed(false);
-        if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
+        if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) {
+            return;
+        }
         Path path = chooser.getSelectedFile().toPath();
         inspectingPdf = true;
         updateControls();
@@ -321,8 +351,11 @@ public class Client2 extends JFrame {
         });
     }
 
+    /** Yalnızca seçilmiş dosya gönderilir; ilerleme bildirimi yüzde değişince yenilenir. */
     private void sendPdf() {
-        if (connection == null || selectedPdf == null || sendingFile || sending || inspectingPdf) return;
+        if (connection == null || selectedPdf == null || sendingFile || sending || inspectingPdf) {
+            return;
+        }
         Client2Connection current = connection;
         Path path = selectedPdf;
         sendingFile = true;
@@ -332,7 +365,9 @@ public class Client2 extends JFrame {
             try {
                 current.sendPdf(path, (file, bytes) -> {
                     int percent = percent(bytes, file.size());
-                    if (percent == lastPercent[0]) return;
+                    if (percent == lastPercent[0]) {
+                        return;
+                    }
                     lastPercent[0] = percent;
                     SwingUtilities.invokeLater(() -> {
                         if (connection == current) {
@@ -362,13 +397,18 @@ public class Client2 extends JFrame {
         });
     }
 
+    /** Tamamlanan geçici kopya, kullanıcı kaydetmeyi başarıyla bitirene kadar korunur. */
     private void savePdf() {
         ReceivedFile file = (ReceivedFile) receivedFiles.getSelectedItem();
-        if (file == null || savingFile) return;
+        if (file == null || savingFile) {
+            return;
+        }
         JFileChooser chooser = new JFileChooser();
         chooser.setSelectedFile(new java.io.File(file.metadata().fileName()));
         chooser.setFileFilter(new FileNameExtensionFilter("PDF dosyaları (*.pdf)", "pdf"));
-        if (chooser.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return;
+        if (chooser.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) {
+            return;
+        }
         Path destination = chooser.getSelectedFile().toPath();
         savingFile = true;
         updateControls();
@@ -394,13 +434,19 @@ public class Client2 extends JFrame {
     }
 
     private void markInterruptedFiles() {
-        if (sendingFile) lblSendFile.setText("PDF gönderimi yarıda kesildi.");
-        if (receivingFile) lblReceiveFile.setText("PDF alımı yarıda kesildi; tamamlanmış sayılmadı.");
+        if (sendingFile) {
+            lblSendFile.setText("PDF gönderimi yarıda kesildi.");
+        }
+        if (receivingFile) {
+            lblReceiveFile.setText("PDF alımı yarıda kesildi; tamamlanmış sayılmadı.");
+        }
         sendingFile = false;
         receivingFile = false;
     }
 
-    private static int percent(long bytes, long size) { return (int) (bytes * 100 / size); }
+    private static int percent(long bytes, long size) {
+        return (int) (bytes * 100 / size);
+    }
 
     private static void showProgress(JProgressBar bar, long bytes, long size) {
         bar.setValue(percent(bytes, size));
@@ -408,9 +454,12 @@ public class Client2 extends JFrame {
     }
 
     private static void discard(ReceivedFile file) {
-        try { file.close(); } catch (IOException ignored) { }
+        try {
+            file.close();
+        } catch (IOException ignored) { }
     }
 
+    /** Eski bağlantıdan geciken bildirimlerin yeni oturumu etkilemesini önler. */
     private final class SessionListener implements Client2Connection.Listener {
         private Client2Connection session;
         private int lastPercent = -1;
@@ -419,11 +468,15 @@ public class Client2 extends JFrame {
         @Override
         public void onFileProgress(FileTransfer.Start file, long bytes) {
             int progress = percent(bytes, file.size());
-            if (file.fileId().equals(incomingFileId) && progress == lastPercent) return;
+            if (file.fileId().equals(incomingFileId) && progress == lastPercent) {
+                return;
+            }
             incomingFileId = file.fileId();
             lastPercent = progress;
             SwingUtilities.invokeLater(() -> {
-                if (connection != session || windowClosed) return;
+                if (connection != session || windowClosed) {
+                    return;
+                }
                 receivingFile = true;
                 lblReceiveFile.setText(file.fileName() + " — " + file.size() + " byte — "
                         + (bytes == file.size() ? "Bitiş mesajı bekleniyor" : "Alınıyor"));
@@ -479,12 +532,14 @@ public class Client2 extends JFrame {
         }
     }
 
+    /** Kontrollerin durumu tek noktada, yalnızca geçerli bağlantıya göre belirlenir. */
     private void updateControls() {
         boolean connected = connection != null;
         btnConnect.setEnabled(!connecting && !connected);
         btnDisconnect.setEnabled(connected);
         txtIp.setEditable(!connecting && !connected);
         txtPort.setEditable(!connecting && !connected);
+        cmbKeyExchange.setEnabled(!connecting && !connected);
         cmbCryptoMode.setEnabled(!connecting && !connected);
         txtPassphrase.setEditable(!connecting && !connected);
         txtMessage.setEnabled(connected && !sending && !sendingFile);

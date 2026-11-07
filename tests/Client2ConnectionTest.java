@@ -6,6 +6,7 @@ import common.FileTransferReceiver.ReceivedFile;
 import common.crypto.CryptoMode;
 import common.crypto.AesSessionFrameCodec;
 import common.crypto.RsaCryptoService;
+import common.crypto.KeyExchangeMethod;
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
@@ -50,6 +51,7 @@ public final class Client2ConnectionTest {
                     ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
                     out.flush();
                     ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
+                    expectRsaSelection(in);
                     out.writeUTF(SecureFrameCodec.encode(new Message(MessageType.RSA_PUB_KEY_EXCHANGE,
                             rsa.getPublicKeyAsBase64().getBytes(StandardCharsets.UTF_8))));
                     out.flush();
@@ -73,7 +75,8 @@ public final class Client2ConnectionTest {
             return connect(events, CryptoMode.INSECURE, null);
         }
         Client2Connection connect(Events events, CryptoMode mode, String password) throws IOException {
-            return Client2Connection.connect(server.getInetAddress().getHostAddress(), server.getLocalPort(), events, mode, password);
+            return Client2Connection.connect(server.getInetAddress().getHostAddress(), server.getLocalPort(),
+                    events, mode, password, KeyExchangeMethod.RSA_2048);
         }
         void await() throws Exception { finished.get(10, TimeUnit.SECONDS); }
         public void close() throws IOException {
@@ -396,6 +399,7 @@ public final class Client2ConnectionTest {
                     socket.setSoTimeout(5000);
                     ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream()); out.flush();
                     ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
+                    expectRsaSelection(in);
                     out.writeUTF(SecureFrameCodec.encode(new Message(MessageType.RSA_PUB_KEY_EXCHANGE,
                             rsa.getPublicKeyAsBase64().getBytes(StandardCharsets.UTF_8)))); out.flush();
                     Message request = SecureFrameCodec.decode(in.readUTF());
@@ -412,7 +416,8 @@ public final class Client2ConnectionTest {
                 } catch (Throwable e) { receivedData.completeExceptionally(e); }
             });
 
-            Client2Connection connection = Client2Connection.connect("127.0.0.1", listener.getLocalPort(), new Events());
+            Client2Connection connection = Client2Connection.connect("127.0.0.1", listener.getLocalPort(),
+                    new Events(), CryptoMode.INSECURE, null, KeyExchangeMethod.RSA_2048);
             try (connection) {
                 connection.sendText("ACK sonrası güvenli veri");
                 Message received = SecureFrameCodec.decode(receivedData.get(5, TimeUnit.SECONDS));
@@ -428,6 +433,13 @@ public final class Client2ConnectionTest {
         byte[] header = "%PDF-1.7\n".getBytes(StandardCharsets.US_ASCII);
         System.arraycopy(header, 0, content, 0, header.length);
         return content; // İkili aktarım fixture'ı; PDF ayrıştırıcısı testi değildir.
+    }
+
+    private static void expectRsaSelection(ObjectInputStream in) throws IOException {
+        Message selection = SecureFrameCodec.decode(in.readUTF());
+        check(selection.type() == MessageType.KEY_EXCHANGE_INIT
+                && Arrays.equals((byte[]) selection.payload(), "RSA_2048".getBytes(StandardCharsets.US_ASCII)),
+                "İstemci RSA-2048 seçimini göndermedi");
     }
     private static void send(ObjectOutputStream out, byte[] key, MessageType type, Object payload) throws IOException {
         String frame = SecureFrameCodec.encode(new Message(type, "Client1", "Client2", payload, null));

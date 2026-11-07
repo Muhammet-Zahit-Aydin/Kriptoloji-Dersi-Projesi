@@ -93,9 +93,36 @@ gönderir. Gelen paketleri `FileTransferReceiver` sırayla geçici dosyada topla
 tamamlanan dosya **Gelen PDF'yi Kaydet** ile seçilen hedefe kopyalanır.
 Client-2 aynı ortak aktarım bileşenlerini kullanır.
 
-Her bağlantıda istemci 16 byte'lık rastgele AES oturum anahtarı üretir ve sunucunun
-RSA-2048/OAEP açık anahtarıyla koruyup gönderir. Sunucu anahtarı çözer, 128 bit
-olduğunu doğrular ve ACK döndürür; istemciler ancak ACK'den sonra gönderime açılır.
+İki istemcide de bağlantıdan önce **Anahtar değişimi** alanından **DH-2048** veya
+**RSA-2048** seçilir; varsayılan DH-2048'dir. İstemciler farklı yöntemler seçebilir:
+her birinin sunucuyla bağımsız oturumu vardır. Yöntem seçimi, bağlantı kurulurken ve
+bağlıyken kilitlenir. İlk `KEY_EXCHANGE_INIT` paketi istemci kimliğini ve seçilen
+yöntemi taşır; sunucu yalnızca bu yöntemin el sıkışmasını yürütür.
+
+RSA-2048 seçiminde istemci 16 byte'lık rastgele AES oturum anahtarı üretir ve
+sunucunun RSA-2048/OAEP açık anahtarıyla koruyup gönderir. Sunucu anahtarı çözer,
+128 bit olduğunu doğrular. DH-2048 seçiminde iki taraf açık DH anahtarlarını
+değiştirir ve aynı AES anahtarını kendi tarafında hesaplar; AES anahtarı ve ortak
+sır ağdan doğrudan gönderilmez. İstemciler yalnızca `HANDSHAKE_SUCCESS` ACK'inden
+sonra gönderime açılır; yanlış paket, bozuk açık anahtar veya başarısız ACK'de
+bağlantı kapatılır.
+
+DH parametreleri ortak `DiffieHellmanUtils` sınıfında tanımlıdır:
+[RFC 3526 bölüm 3](https://www.rfc-editor.org/rfc/rfc3526.html#section-3),
+2048 bit MODP grup 14 ve `g = 2`. Gelen açık anahtarın grup parametreleri,
+değer aralığı ve alt grup üyeliği doğrulanır. Açık anahtar kodlaması X.509
+SubjectPublicKeyInfo DER'dir. Java `KeyAgreement("DH")` ile üretilen ortak sırrın
+SHA-256 özetinin ilk 16 byte'ı AES-128 anahtarı olarak kullanılır; bu, önceki
+ortak anahtar türetme sözleşmesidir. [Java 25 KeyAgreement belgesi](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/javax/crypto/KeyAgreement.html)
+ilgili API akışını açıklar. Bu aşamada taraf kimliği sertifika veya imzayla doğrulanmaz.
+
+El sıkışma paketleri mevcut `KRIPTO1` zarfını kullanır: RSA açık anahtar türü `7`,
+korunmuş AES anahtarı `8`, başarılı/başarısız ACK `9`/`10`, DH açık anahtarı `11`,
+yöntem seçimi `12`'dir. Yöntem seçiminde ASCII `DH_2048` veya `RSA_2048` taşınır;
+DH açık anahtarları byte dizisi olarak gönderilir. Ortak `SessionHandshake` iki
+istemci tarafından kullanılır. Bu protokol değişikliğinden sonra sunucu ve iki
+istemci birlikte yeniden derlenmelidir.
+
 Bu anahtar her TCP bağlantısına özeldir. Uygulama çerçevelerinin tamamı (metin ve
 PDF dahil) istemci-sunucu arasında AES-128-GCM ile korunur; sunucu gönderenin
 çerçevesini doğrulayıp alıcının ayrı oturum anahtarıyla yeniden şifreler.
@@ -141,6 +168,7 @@ javac --release 25 -encoding UTF-8 -d out common/*.java common/crypto/*.java ser
 java -cp out tests.Client2ConnectionTest
 java -cp out tests.InsecureTextIntegrationTest
 java -cp out tests.ManualAes128Test
+java -cp out tests.DhSessionHandshakeTest
 ```
 
 İlk test UTF metni, PDF sözleşmesini ve Client-2'nin AES-GCM/manuel AES-CBC
@@ -156,6 +184,15 @@ parçanın sunucu tarafından reddedildiği de kontrol edilir. Bu test GUI tıkl
 çalıştırmaz. Test sonunda yalnızca kendi sunucusu ve geçici dosyaları temizlenir.
 Testten önce 5000 portundaki kendi sunucunuzu durdurun.
 
+`DhSessionHandshakeTest`, Client-2'nin ürettiği AES çerçevesinin sunucunun DH ile
+türettiği anahtarla açıldığını, yeniden bağlantıda anahtarın yenilendiğini ve ACK
+gelmeden bağlantının kullanılabilir dönmediğini doğrular. El sıkışmada yalnızca
+yöntem seçimi ve iki açık DH anahtarı taşındığı, doğrudan AES anahtarı gönderilmediği
+kontrol edilir. Yanlış DH grubu, bozuk açık anahtar ve hatalı ACK de reddedilmelidir.
+Gerçek sunucu entegrasyon testi RSA/RSA, RSA/DH, DH/RSA ve DH/DH eşleşmelerinde
+çift yönlü metin akışını da çalıştırır. Bu kontroller paket yakalama/Wireshark
+ölçümü yerine otomatik protokol testidir.
+
 Bu bilgisayarda test için indirilen taşınabilir Java 25'i seçmek için aşağıdaki
 komutları kullanın. `tmp/` Git'e dahil değildir; bu JDK temiz bir klonla gelmez.
 Başka bilgisayarda JDK 25 kurulmalı veya komutlardaki yol yerel JDK'ya göre
@@ -167,6 +204,7 @@ $jdk25Path = (Resolve-Path -LiteralPath './tmp/jdk-25.0.2').Path
 & "$jdk25Path/bin/java.exe" -cp out tests.Client2ConnectionTest
 & "$jdk25Path/bin/java.exe" -cp out tests.InsecureTextIntegrationTest
 & "$jdk25Path/bin/java.exe" -cp out tests.ManualAes128Test
+& "$jdk25Path/bin/java.exe" -cp out tests.DhSessionHandshakeTest
 ```
 
 Elle denemek için ayrı terminallerde `java -cp out server.Server`,
@@ -174,6 +212,11 @@ Elle denemek için ayrı terminallerde `java -cp out server.Server`,
 İki istemcide `127.0.0.1:5000` ile bağlanıp Türkçe metni iki yönde gönderin.
 AES kiplerini denemek için ikisinde de aynı modu ve ortak parolayı seçin. PDF seçip
 karşı istemcide kaydedin. Sistemin varsayılanı Java 25 değilse yukarıdaki `java.exe` yolunu kullanın.
+
+RSA/DH'yi elle denemek için önce iki istemcide DH-2048 seçip bağlanın; ACK sonrası
+durumda DH-2048 görünmeli ve metin iki yönde ulaşmalıdır. Bağlantıları kesip aynı
+kontrolü RSA-2048 ile yapın. Son olarak bir istemci RSA, diğeri DH seçiliyken bağlanıp
+iki yönde metin gönderin. Oturum kurulurken gönderme kontrolleri kapalı kalmalıdır.
 
 PDF bütünlüğünü elle kontrol etmek için kaynak PDF'yi, terminalde belirtilen
 `server-files/<fileId>.pdf` kopyasını ve alıcının kaydettiği PDF'yi karşılaştırın:

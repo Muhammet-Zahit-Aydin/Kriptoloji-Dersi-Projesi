@@ -7,6 +7,8 @@ import common.MessageType;
 import common.SecureFrameCodec;
 import common.crypto.AesSessionFrameCodec;
 import common.crypto.DiffieHellmanUtils;
+import common.crypto.KeyExchangeMethod;
+import common.crypto.RsaCryptoService;
 
 import java.io.IOException;
 import java.io.ObjectInputStream;
@@ -15,11 +17,12 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
 import java.security.PublicKey;
 import java.util.Set;
+import java.util.Arrays;
 import java.util.concurrent.ConcurrentHashMap;
-import javax.crypto.spec.SecretKeySpec;
 
 /** AES-GCM session relay shared by the two desktop clients. */
 public final class Server {
@@ -95,40 +98,67 @@ public final class Server {
                                              ObjectInputStream in) throws IOException {
         try {
             socket.setSoTimeout(5000);
-            
-            // 1. Sunucu kendi DH anahtar çiftini üretir
-            KeyPair serverKeyPair = DiffieHellmanUtils.generateDHKeyPair();
-            
-            // 2. Sunucunun DH Public Key'ini istemciye gönder
-            Message publicKeyMessage = new Message(MessageType.DH_PUB_KEY_EXCHANGE,
-                    serverKeyPair.getPublic().getEncoded());
-            out.writeUTF(SecureFrameCodec.encode(publicKeyMessage));
-            out.flush();
-
-            // 3. İstemciden gelen DH Public Key'i ve İstemci ID'sini bekle
-            Message request = SecureFrameCodec.decode(in.readUTF());
-            if (request.type() != MessageType.DH_PUB_KEY_EXCHANGE
-                    || !(request.payload() instanceof byte[] clientPubKeyBytes)
-                    || request.senderId() == null || request.senderId().isBlank()) {
-                sendHandshakeResult(out, false);
-                return null;
+            Message selection = SecureFrameCodec.decode(in.readUTF());
+            if (selection.type() != MessageType.KEY_EXCHANGE_INIT
+                    || !(selection.payload() instanceof byte[] methodBytes)
+                    || selection.senderId() == null || selection.senderId().isBlank()) {
+                throw new IOException("Anahtar değişim yöntemi ve istemci kimliği gerekli.");
             }
+            KeyExchangeMethod method = KeyExchangeMethod.valueOf(new String(methodBytes, StandardCharsets.US_ASCII));
+            byte[] key = method == KeyExchangeMethod.DH_2048
+                    ? acceptDh(in, out, selection.senderId())
+                    : acceptRsa(in, out, selection.senderId());
 
-            // 4. İstemcinin Public Key'ini dönüştür, Shared Secret hesapla ve AES anahtarını türet
-            PublicKey clientPubKey = DiffieHellmanUtils.getPublicKeyFromBytes(clientPubKeyBytes);
-            byte[] sharedSecret = DiffieHellmanUtils.computeSharedSecret(serverKeyPair.getPrivate(), clientPubKey);
-            SecretKeySpec aesSessionKey = DiffieHellmanUtils.deriveAes128Key(sharedSecret);
-            byte[] keyBytes = aesSessionKey.getEncoded();
-
-            // 5. Başarılı olduğunu istemciye bildir
-            sendHandshakeResult(out, true); 
-            return new Session(socket, out, request.senderId(), keyBytes);
-            
+            sendHandshakeResult(out, true);
+            System.out.println("[OTURUM] " + selection.senderId() + " | " + method);
+            return new Session(socket, out, selection.senderId(), key);
         } catch (Exception e) {
             try { sendHandshakeResult(out, false); } catch (IOException ignored) { }
             if (e instanceof IOException io) throw io;
-            throw new IOException("Diffie-Hellman anahtar değişimi doğrulanamadı.", e);
+            throw new IOException("Anahtar değişimi doğrulanamadı.", e);
         }
+    }
+
+    /** DH'de iki taraf aynı sırrı hesaplar; AES anahtarı ağdan gönderilmez. */
+    private static byte[] acceptDh(ObjectInputStream in, ObjectOutputStream out, String clientId) throws Exception {
+        KeyPair serverKeys = DiffieHellmanUtils.generateDHKeyPair();
+        out.writeUTF(SecureFrameCodec.encode(new Message(MessageType.DH_PUB_KEY_EXCHANGE,
+                serverKeys.getPublic().getEncoded())));
+        out.flush();
+
+        byte[] encodedKey = readClientKey(in, MessageType.DH_PUB_KEY_EXCHANGE, clientId);
+        PublicKey clientKey = DiffieHellmanUtils.getPublicKeyFromBytes(encodedKey);
+        byte[] secret = DiffieHellmanUtils.computeSharedSecret(serverKeys.getPrivate(), clientKey);
+        try {
+            return DiffieHellmanUtils.deriveAes128Key(secret).getEncoded();
+        } finally {
+            Arrays.fill(secret, (byte) 0);
+        }
+    }
+
+    /** Önceki RSA-2048 akışı yöntem seçiminin arkasında korunur. */
+    private static byte[] acceptRsa(ObjectInputStream in, ObjectOutputStream out, String clientId) throws Exception {
+        RsaCryptoService rsa = new RsaCryptoService();
+        rsa.generateKeyPair();
+        out.writeUTF(SecureFrameCodec.encode(new Message(MessageType.RSA_PUB_KEY_EXCHANGE,
+                rsa.getPublicKeyAsBase64().getBytes(StandardCharsets.UTF_8))));
+        out.flush();
+
+        byte[] encryptedKey = readClientKey(in, MessageType.AES_KEY_EXCHANGE, clientId);
+        byte[] key = rsa.decryptAesKey(encryptedKey);
+        if (key.length != 16) {
+            throw new IOException("AES oturum anahtarı 128 bit olmalı.");
+        }
+        return key;
+    }
+
+    private static byte[] readClientKey(ObjectInputStream in, MessageType type, String clientId) throws IOException {
+        Message request = SecureFrameCodec.decode(in.readUTF());
+        if (request.type() != type || !(request.payload() instanceof byte[] key)
+                || !clientId.equals(request.senderId())) {
+            throw new IOException("Beklenen istemci anahtar paketi alınamadı.");
+        }
+        return key;
     }
 
     private static void sendHandshakeResult(ObjectOutputStream out, boolean accepted) throws IOException {

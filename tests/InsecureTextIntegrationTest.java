@@ -9,7 +9,8 @@ import common.FileTransferSender;
 import common.SecureFrameCodec;
 import common.crypto.CryptoMode;
 import common.crypto.AesSessionFrameCodec;
-import common.crypto.RsaSessionHandshake;
+import common.crypto.SessionHandshake;
+import common.crypto.KeyExchangeMethod;
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
@@ -50,48 +51,53 @@ public final class InsecureTextIntegrationTest {
                 public void onDisconnected(String reason) { }
                 public void onFileReceived(FileTransferReceiver.ReceivedFile file) { client2Files.add(file); }
             };
-            try (Socket client1 = new Socket("127.0.0.1", 5000)) {
-                // Aynı akış sırası ve aynı UTF çağrıları client1.Client1 içinde kullanılır.
-                ObjectOutputStream out = new ObjectOutputStream(client1.getOutputStream());
-                out.flush();
-                ObjectInputStream in = new ObjectInputStream(client1.getInputStream());
-                byte[] client1SessionKey = RsaSessionHandshake.connect(in, out, "Client1");
-                BlockingQueue<String> client1Messages = new LinkedBlockingQueue<>();
-                Thread.startVirtualThread(() -> {
-                    try { while (!client1.isClosed()) client1Messages.add(
-                            AesSessionFrameCodec.decode(in.readUTF(), client1SessionKey)); }
-                    catch (IOException expectedOnClose) { }
-                });
-                CryptoMode[] modes = {CryptoMode.INSECURE, CryptoMode.INSECURE,
-                        CryptoMode.AES_128_GCM, CryptoMode.AES_128_CBC_MANUAL};
-                for (int attempt = 0; attempt < modes.length; attempt++) {
-                    CryptoMode mode = modes[attempt];
-                    try (Client2Connection client2 = Client2Connection.connect("127.0.0.1", 5000, listener, mode, TEST_PASSWORD)) {
-                        client2.startReceiving();
-                        // ACK sonrasında iki oturumun yönlendirmeye katıldığını doğrula.
-                        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-                        while (true) {
-                            client2.sendText("SYNC");
-                            String frame = client1Messages.poll(100, TimeUnit.MILLISECONDS);
-                            if (frame != null && "SYNC".equals(SecureFrameCodec.decode(frame, TEST_PASSWORD).payload())) break;
-                            if (System.nanoTime() > deadline) throw new AssertionError("Yönlendirme hazır olmadı");
+            for (KeyExchangeMethod client1Method : KeyExchangeMethod.values()) {
+                try (Socket client1 = new Socket("127.0.0.1", 5000)) {
+                    // Aynı akış sırası ve aynı UTF çağrıları client1.Client1 içinde kullanılır.
+                    ObjectOutputStream out = new ObjectOutputStream(client1.getOutputStream());
+                    out.flush();
+                    ObjectInputStream in = new ObjectInputStream(client1.getInputStream());
+                    byte[] client1SessionKey = SessionHandshake.connect(in, out, "Client1", client1Method);
+                    BlockingQueue<String> client1Messages = new LinkedBlockingQueue<>();
+                    Thread.startVirtualThread(() -> {
+                        try { while (!client1.isClosed()) client1Messages.add(
+                                AesSessionFrameCodec.decode(in.readUTF(), client1SessionKey)); }
+                        catch (IOException expectedOnClose) { }
+                    });
+                    CryptoMode[] modes = {CryptoMode.INSECURE, CryptoMode.INSECURE,
+                            CryptoMode.AES_128_GCM, CryptoMode.AES_128_CBC_MANUAL};
+                    for (int attempt = 0; attempt < modes.length; attempt++) {
+                        CryptoMode mode = modes[attempt];
+                        KeyExchangeMethod client2Method = KeyExchangeMethod.values()[attempt % 2];
+                        try (Client2Connection client2 = Client2Connection.connect("127.0.0.1", 5000, listener,
+                                mode, TEST_PASSWORD, client2Method)) {
+                            client2.startReceiving();
+                            // ACK sonrasında iki oturumun yönlendirmeye katıldığını doğrula.
+                            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                            while (true) {
+                                client2.sendText("SYNC");
+                                String frame = client1Messages.poll(100, TimeUnit.MILLISECONDS);
+                                if (frame != null && "SYNC".equals(SecureFrameCodec.decode(frame, TEST_PASSWORD).payload())) break;
+                                if (System.nanoTime() > deadline) throw new AssertionError("Yönlendirme hazır olmadı");
+                            }
+                            String toClient1 = "Client2 → Client1: ığüşöç İĞÜŞÖÇ 👋\n" + attempt;
+                            client2.sendText(toClient1);
+                            expect(client1Messages, toClient1);
+                            String toClient2 = "Client1 → Client2: ığüşöç İĞÜŞÖÇ\n" + attempt;
+                            String applicationFrame = SecureFrameCodec.encode(
+                                    new Message(MessageType.TEXT, "Client1", "Client2", toClient2, null), mode, TEST_PASSWORD);
+                            out.writeUTF(AesSessionFrameCodec.encode(applicationFrame, client1SessionKey));
+                            out.flush();
+                            expect(client2Messages, toClient2);
+                            if (attempt == 0 && client1Method == KeyExchangeMethod.RSA_2048) pdfRoundTrips(client2, out, client1SessionKey,
+                                    client1Messages, client2Files, directory);
                         }
-                        String toClient1 = "Client2 → Client1: ığüşöç İĞÜŞÖÇ 👋\n" + attempt;
-                        client2.sendText(toClient1);
-                        expect(client1Messages, toClient1);
-                        String toClient2 = "Client1 → Client2: ığüşöç İĞÜŞÖÇ\n" + attempt;
-                        String applicationFrame = SecureFrameCodec.encode(
-                                new Message(MessageType.TEXT, "Client1", "Client2", toClient2, null), mode, TEST_PASSWORD);
-                        out.writeUTF(AesSessionFrameCodec.encode(applicationFrame, client1SessionKey));
-                        out.flush();
-                        expect(client2Messages, toClient2);
-                        if (attempt == 0) pdfRoundTrips(client2, out, client1SessionKey,
-                                client1Messages, client2Files, directory);
                     }
                 }
             }
             System.out.println("PASS: Actual server.Server, Client-1 UTF compatibility, bidirectional text and reconnect.");
             System.out.println("PASS: Actual server relay, bidirectional AES-GCM and manual AES-CBC text.");
+            System.out.println("PASS: RSA/RSA, RSA/DH, DH/RSA and DH/DH sessions with bidirectional text.");
             rejectInvalidServerTransfer(directory);
         } finally {
             server.destroy();
@@ -167,7 +173,7 @@ public final class InsecureTextIntegrationTest {
             ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
             out.flush();
             ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
-            byte[] sessionKey = RsaSessionHandshake.connect(in, out, "Client1");
+            byte[] sessionKey = SessionHandshake.connect(in, out, "Client1", KeyExchangeMethod.RSA_2048);
             var metadata = new FileTransfer.Start(java.util.UUID.randomUUID(), "invalid.pdf", 100);
             out.writeUTF(AesSessionFrameCodec.encode(SecureFrameCodec.encode(new Message(MessageType.FILE_START,
                     "Client1", "Client2", metadata, null)), sessionKey));
