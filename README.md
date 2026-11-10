@@ -167,6 +167,7 @@ JDK 25 gereklidir. `java -version` ve `javac -version` çıktılarının ikisini
 javac --release 25 -encoding UTF-8 -d out common/*.java common/crypto/*.java server/*.java client1/*.java client2/*.java tests/*.java
 java -cp out tests.Client2ConnectionTest
 java -cp out tests.InsecureTextIntegrationTest
+java -cp out tests.AesIvNonceTest
 java -cp out tests.ManualAes128Test
 java -cp out tests.DhSessionHandshakeTest
 ```
@@ -181,8 +182,16 @@ bileşenleriyle ek parolasız/AES metni, yeniden bağlantıyı ve PDF aktarımı
 doğrular. Her PDF yönünde kaynak/sunucu/alıcı kopyalarının byte boyutu, byte
 içeriği ve SHA-256 özeti karşılaştırılır; sonuçlar terminale yazılır. Sırasız
 parçanın sunucu tarafından reddedildiği de kontrol edilir. Bu test GUI tıklamalarını
-çalıştırmaz. Test sonunda yalnızca kendi sunucusu ve geçici dosyaları temizlenir.
+çalıştırmaz. PDF yönleri dört RSA/DH istemci eşleşmesinin tamamında denenir;
+her FILE_START/FILE_CHUNK/FILE_END çerçevesi bağlantının AES-GCM anahtarıyla
+korunur. Sunucu gelen paketi açar, tamamlanan PDF'yi diske kaydeder ve alıcı
+oturum anahtarıyla yeni nonce kullanarak yeniden şifreler. Test sonunda yalnızca
+kendi sunucusu ve geçici dosyaları temizlenir.
 Testten önce 5000 portundaki kendi sunucunuzu durdurun.
+
+`AesIvNonceTest`, AES-GCM'nin 12 byte nonce ve AES-CBC'nin 16 byte IV
+kullanmasını, aynı metin tekrar şifrelendiğinde değerlerin yenilenmesini ve
+oturum çerçevelerinin nonce taşımasını doğrular.
 
 `DhSessionHandshakeTest`, Client-2'nin ürettiği AES çerçevesinin sunucunun DH ile
 türettiği anahtarla açıldığını, yeniden bağlantıda anahtarın yenilendiğini ve ACK
@@ -203,6 +212,7 @@ $jdk25Path = (Resolve-Path -LiteralPath './tmp/jdk-25.0.2').Path
 & "$jdk25Path/bin/javac.exe" --release 25 -encoding UTF-8 -d out common/*.java common/crypto/*.java server/*.java client1/*.java client2/*.java tests/*.java
 & "$jdk25Path/bin/java.exe" -cp out tests.Client2ConnectionTest
 & "$jdk25Path/bin/java.exe" -cp out tests.InsecureTextIntegrationTest
+& "$jdk25Path/bin/java.exe" -cp out tests.AesIvNonceTest
 & "$jdk25Path/bin/java.exe" -cp out tests.ManualAes128Test
 & "$jdk25Path/bin/java.exe" -cp out tests.DhSessionHandshakeTest
 ```

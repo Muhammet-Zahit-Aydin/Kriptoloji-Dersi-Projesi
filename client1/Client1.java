@@ -200,15 +200,23 @@ public class Client1 extends JFrame {
         if(chooser.showOpenDialog(this)!=JFileChooser.APPROVE_OPTION) return;
         Path path=chooser.getSelectedFile().toPath(); sendingFile=true; updateControls();
         Thread.startVirtualThread(() -> {
+            java.util.concurrent.atomic.AtomicBoolean started = new java.util.concurrent.atomic.AtomicBoolean();
             try {
                 FileTransfer.Start metadata=FileTransferSender.inspect(path);
-                FileTransferSender.send(path,metadata,"Client1","Client2",packet -> writeFrame(
-                        AesSessionFrameCodec.encode(SecureFrameCodec.encode(packet, activeMode, activePassword), sessionKey)),bytes -> {
+                FileTransferSender.send(path,metadata,"Client1","Client2",packet -> {
+                    started.set(true);
+                    // START, her CHUNK ve END ayrı bir AES-GCM oturum nonce'u alır.
+                    String applicationFrame = SecureFrameCodec.encode(packet);
+                    writeFrame(AesSessionFrameCodec.encode(applicationFrame, sessionKey));
+                },bytes -> {
                     if(bytes==metadata.size()||bytes==0) SwingUtilities.invokeLater(() -> append("[PDF] "+metadata.fileName()+": "+bytes+" / "+metadata.size()+" byte"));
                 });
                 SwingUtilities.invokeLater(() -> append("[PDF] Gönderildi: "+metadata.fileName()));
-            } catch(IOException|RuntimeException e) { SwingUtilities.invokeLater(() -> append("[PDF / Hata] "+e.getMessage())); }
-            finally { sendingFile=false; SwingUtilities.invokeLater(this::updateControls); }
+            } catch(IOException|RuntimeException e) {
+                SwingUtilities.invokeLater(() -> append("[PDF / Hata] "+e.getMessage()));
+                // Yarım dosya alıcısını temizlemek için bağlantıyı kapat.
+                if(started.get()) SwingUtilities.invokeLater(this::disconnectFromServer);
+            } finally { sendingFile=false; SwingUtilities.invokeLater(this::updateControls); }
         });
     }
 

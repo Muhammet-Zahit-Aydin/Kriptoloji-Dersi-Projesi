@@ -156,6 +156,7 @@ public final class Client2Connection implements AutoCloseable {
             FileTransfer.Start metadata = FileTransferSender.inspect(path);
             FileTransferSender.send(path, metadata, CLIENT_ID, "Client1", message -> {
                 started.set(true);
+                // FILE_START, each CHUNK, and FILE_END get a fresh session GCM nonce.
                 String applicationFrame = SecureFrameCodec.encode(message);
                 writeFrame(AesSessionFrameCodec.encode(applicationFrame, sessionKey));
             }, bytes -> progress.accept(metadata, bytes));
