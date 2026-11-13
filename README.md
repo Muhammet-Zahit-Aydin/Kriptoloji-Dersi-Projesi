@@ -170,6 +170,8 @@ java -cp out tests.InsecureTextIntegrationTest
 java -cp out tests.AesIvNonceTest
 java -cp out tests.ManualAes128Test
 java -cp out tests.DhSessionHandshakeTest
+java -cp out tests.EcdhKeyExchangeTest
+java -cp out client2.EcdhLocalTest
 ```
 
 İlk test UTF metni, PDF sözleşmesini ve Client-2'nin AES-GCM/manuel AES-CBC
@@ -215,6 +217,8 @@ $jdk25Path = (Resolve-Path -LiteralPath './tmp/jdk-25.0.2').Path
 & "$jdk25Path/bin/java.exe" -cp out tests.AesIvNonceTest
 & "$jdk25Path/bin/java.exe" -cp out tests.ManualAes128Test
 & "$jdk25Path/bin/java.exe" -cp out tests.DhSessionHandshakeTest
+& "$jdk25Path/bin/java.exe" -cp out tests.EcdhKeyExchangeTest
+& "$jdk25Path/bin/java.exe" -cp out client2.EcdhLocalTest
 ```
 
 Elle denemek için ayrı terminallerde `java -cp out server.Server`,
@@ -239,6 +243,43 @@ Get-FileHash -LiteralPath $copies -Algorithm SHA256
 
 Örnek yolları kendi dosyalarınızla değiştirin. Üç boyut ve üç özet aynı olmalıdır;
 aynı kontrolü ters yöndeki PDF gönderimi için de yapın.
+
+## ECDH ortak bileşeni ve Client-2 yerel testi
+
+`common.crypto.EcdhUtils`, anahtar çifti üretme, karşı açık anahtarı çözme,
+ortak sır hesaplama ve AES-128 anahtarı türetme işlemlerini ortak modülde sunar.
+`client2.EcdhLocalTest`, Client-2 ve test eşi rollerini aynı süreçte çalıştırır.
+İki rol açık anahtarlarının DER byte dizilerini değiştirir, ortak sırlarını ayrı
+ayrı hesaplar ve mevcut `AesSessionFrameCodec` ile iki yönde metin doğrular.
+Bu yerel test sunucu başlatmayı gerektirmez. ECDH'nin sunucu el sıkışmasına
+bağlanması plandaki sonraki entegrasyon adımına aittir.
+
+| Parametre | Seçim |
+|---|---|
+| Eğri | `secp256r1` / NIST P-256 |
+| Anahtar çifti üretimi | Java `KeyPairGenerator("EC")` ve `ECGenParameterSpec("secp256r1")` |
+| Ortak sır üretimi | Java `KeyAgreement("ECDH")`, P-256 için 32 byte |
+| Açık anahtar kodlaması | `PublicKey.getEncoded()` ile X.509 SubjectPublicKeyInfo DER |
+| Açık anahtar çözme | `KeyFactory("EC")` ve `X509EncodedKeySpec` |
+| AES-128 türetme | `SHA-256(sharedSecret)` çıktısının ilk 16 byte'ı |
+
+P-256, Java 25'in ECDH desteğinde yer alır. Bileşen standart Java kriptografi
+API'lerini kullanır. [Java 25 KeyAgreement belgesi](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/javax/crypto/KeyAgreement.html)
+
+Anahtar türetme biçimi, projenin mevcut DH sözleşmesiyle aynıdır. Açık anahtarın
+eğri parametreleri, noktanın alan sınırları ve eğri denklemi doğrulanır. Farklı
+eğri, bozuk DER, eğri dışındaki nokta ve yanlış boyuttaki ortak sır reddedilir.
+Özel anahtarlar yerelde tutulur. Yerel değişim adımına yalnızca açık anahtarlar
+verilir. Test çıktıları ortak sır veya AES anahtarı değerlerini içermez.
+
+`tests.EcdhKeyExchangeTest`, iki yöndeki ortak sırrı yayımlanmış P-256 referans
+değeriyle karşılaştırır. AES türetmesi ayrıca sabit bir beklenen değerle,
+anahtar yenilenmesi ve geçersiz girdiler de ayrı senaryolarla doğrulanır.
+[RFC 5903 bölüm 8.1](https://www.rfc-editor.org/rfc/rfc5903.html#section-8.1)
+
+Yukarıdaki Java 25 derlemesinden sonra `tests.EcdhKeyExchangeTest` dört,
+`client2.EcdhLocalTest` üç `PASS` satırı üretmelidir. Yerel test sonuçları
+ECDH'nin hesaplama ve açık anahtar kodlama hazırlığını doğrular.
 
 ## 🌐 Yerel Ağ (LAN) Üzerinde Bağlantı ve Güvenlik Duvarı Ayarları
 
